@@ -214,7 +214,7 @@ Windows setup:
 
 ## 9. Roadmap and status
 
-Full exit criteria are in lore §8. **Current status: M0 done (2026-10-19), next up M1.** Crates so far: `ge_core`, `ge_platform`, `ge_rhi`, `ge_engine`, `apps/game` and `xtask` (plan: `docs/plans/0001`).
+Full exit criteria are in lore §8. **Current status: M1 done (2026-10-19), next up M2.** The Tracy GPU-zone check is still manual (needs the Tracy GUI). Crates so far: `ge_core`, `ge_platform`, `ge_rhi`, `ge_shader`, `ge_render`, `ge_engine`, `apps/game` and `xtask` (plans: `docs/plans/0001`, `0002`).
 
 **Known machine quirk:** this hybrid laptop's panel (1920 wide, 144 Hz) is driven by the Radeon, so frames rendered on the RTX 3050 are copied across adapters. On the **"Silent"** power plan the dGPU capped at about 45 fps even for a clear-only frame. On **"Turbo"** it runs at the full 144 Hz (6.94 ms) on both Vulkan and D3D12. Always benchmark on Turbo. Windowed Mailbox is still capped at the refresh rate by the cross-adapter copy, so measure GPU cost with GPU timestamps (M1), not fps.
 

@@ -2,12 +2,24 @@
 //! API (law 12). Public types are opaque: no `wgpu` type appears in this crate's API, so a
 //! native D3D12/Vulkan backend can slot in behind the same surface later.
 //!
-//! No scene concepts live here — just device, swapchain, frames and passes.
+//! No scene concepts live here — just device, swapchain, frames, resources, passes and
+//! GPU timestamps.
 
+mod pass;
+mod resources;
+mod timestamps;
 mod wgpu_backend;
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+pub use pass::{DepthAttachment, LoadOp, RenderPass, RenderPassDesc};
+pub use resources::{
+    BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,
+    Buffer, BufferDesc, BufferUsage, CompareFunction, CullMode, DepthState, RenderPipeline,
+    RenderPipelineDesc, ShaderModule, ShaderStages, Texture, TextureDesc, TextureFormat,
+    TextureUsage, VertexAttribute, VertexFormat, VertexLayout,
+};
+pub use timestamps::{GpuTimings, PassTiming};
 pub use wgpu_backend::{Frame, Rhi, Swapchain};
 
 ge_core::declare_cvar!(pub static R_VSYNC: bool =
@@ -17,6 +29,11 @@ ge_core::declare_cvar!(pub static R_ALLOW_INTEGRATED_GPU: bool = (
     false,
     "Allow picking an integrated GPU when a discrete one exists (testing the iGPU path)",
     ge_core::CVarFlags::READ_ONLY,
+));
+ge_core::declare_cvar!(pub static R_GPU_TIMESTAMPS: bool = (
+    "r.GpuTimestamps",
+    true,
+    "Measure per-pass GPU time with timestamp queries (needs adapter support)"
 ));
 
 /// Anything that can provide native window + display handles (e.g. a platform window).
@@ -56,4 +73,10 @@ pub enum RhiError {
     Device(String),
     #[error("surface lost and could not be recreated: {0}")]
     SurfaceLost(String),
+    #[error("shader module '{label}' rejected: {message}")]
+    Shader { label: String, message: String },
+    #[error("render pipeline '{label}' rejected: {message}")]
+    Pipeline { label: String, message: String },
+    #[error("GPU readback failed: {0}")]
+    Readback(String),
 }

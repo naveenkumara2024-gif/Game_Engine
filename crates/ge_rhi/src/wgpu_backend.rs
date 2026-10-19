@@ -5,17 +5,21 @@ use std::sync::Arc;
 
 use tracing::{error, info, info_span, warn};
 
+use crate::pass::{RenderPass, RenderPassDesc, load_color, load_depth};
+use crate::timestamps::{FrameQueries, GpuProfiler};
 use crate::{
-    AdapterSummary, ClearColor, GpuKind, R_ALLOW_INTEGRATED_GPU, R_VSYNC, RhiError, SurfaceSource,
+    AdapterSummary, GpuKind, GpuTimings, R_ALLOW_INTEGRATED_GPU, R_GPU_TIMESTAMPS, R_VSYNC,
+    RhiError, SurfaceSource, Texture, TextureFormat,
 };
 
 /// Device + queue. One per process.
 pub struct Rhi {
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
     summary: AdapterSummary,
+    profiler: Option<GpuProfiler>,
 }
 
 impl std::fmt::Debug for Rhi {
@@ -31,6 +35,7 @@ pub struct Swapchain {
     surface: wgpu::Surface<'static>,
     window: Arc<dyn SurfaceSource>,
     config: wgpu::SurfaceConfiguration,
+    format: TextureFormat,
     vsync_version: u32,
     /// False while the window has zero area (minimized): no configure, no frames.
     usable: bool,
@@ -46,18 +51,22 @@ impl std::fmt::Debug for Swapchain {
     }
 }
 
-/// One frame in flight: the acquired backbuffer plus a command encoder.
-/// Hand it back to [`Rhi::end_frame`] to submit and present.
+/// One frame being recorded: a color target (backbuffer or offscreen texture) plus a command
+/// encoder. Hand it back to [`Rhi::end_frame`] / [`Rhi::submit_offscreen`].
 pub struct Frame {
-    texture: wgpu::SurfaceTexture,
+    surface_texture: Option<wgpu::SurfaceTexture>,
     view: wgpu::TextureView,
+    size: (u32, u32),
     encoder: wgpu::CommandEncoder,
+    queries: Option<FrameQueries>,
     reconfigure_after_present: bool,
 }
 
 impl std::fmt::Debug for Frame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Frame").finish_non_exhaustive()
+        f.debug_struct("Frame")
+            .field("size", &self.size)
+            .finish_non_exhaustive()
     }
 }
 
@@ -69,16 +78,25 @@ impl Rhi {
         size: (u32, u32),
     ) -> Result<(Self, Swapchain), RhiError> {
         let _span = info_span!("Rhi::new").entered();
-
-        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
-        desc.flags = wgpu::InstanceFlags::from_build_config().with_env();
-        let instance = wgpu::Instance::new(desc);
-
+        let instance = create_instance();
         let surface = instance
             .create_surface(window.clone())
             .map_err(|e| RhiError::Surface(e.to_string()))?;
+        let adapter = pick_adapter(&instance, Some(&surface))?;
+        let rhi = Self::with_adapter(instance, adapter)?;
+        let swapchain = rhi.make_swapchain(surface, window, size)?;
+        Ok((rhi, swapchain))
+    }
 
-        let adapter = pick_adapter(&instance, &surface)?;
+    /// A device with no window, for tests and tools (golden images, cooker previews).
+    pub fn new_headless() -> Result<Self, RhiError> {
+        let _span = info_span!("Rhi::new_headless").entered();
+        let instance = create_instance();
+        let adapter = pick_adapter(&instance, None)?;
+        Self::with_adapter(instance, adapter)
+    }
+
+    fn with_adapter(instance: wgpu::Instance, adapter: wgpu::Adapter) -> Result<Self, RhiError> {
         let summary = summarize(&adapter.get_info());
         info!(
             gpu = %summary.name,
@@ -88,9 +106,10 @@ impl Rhi {
             "selected GPU adapter"
         );
 
+        let required_features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("ge_device"),
-            required_features: wgpu::Features::empty(),
+            required_features,
             required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             memory_hints: wgpu::MemoryHints::Performance,
@@ -105,19 +124,24 @@ impl Rhi {
             error!(?reason, %msg, "GPU device lost");
         });
 
-        let rhi = Self {
+        let profiler = GpuProfiler::new(&device, &queue);
+        Ok(Self {
             instance,
             adapter,
             device,
             queue,
             summary,
-        };
-        let swapchain = rhi.make_swapchain(surface, window, size);
-        Ok((rhi, swapchain))
+            profiler,
+        })
     }
 
     pub fn adapter(&self) -> &AdapterSummary {
         &self.summary
+    }
+
+    /// Most recent completed frame's per-pass GPU times (a few frames old), if measured.
+    pub fn gpu_timings(&self) -> Option<&GpuTimings> {
+        self.profiler.as_ref().and_then(GpuProfiler::latest)
     }
 
     fn make_swapchain(
@@ -125,18 +149,22 @@ impl Rhi {
         surface: wgpu::Surface<'static>,
         window: Arc<dyn SurfaceSource>,
         (width, height): (u32, u32),
-    ) -> Swapchain {
+    ) -> Result<Swapchain, RhiError> {
         let caps = surface.get_capabilities(&self.adapter);
         // sRGB backbuffer: shaders write linear, hardware encodes on store.
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
+        let pick = |srgb: bool| {
+            caps.formats.iter().find_map(|&f| {
+                TextureFormat::from_wgpu(f)
+                    .filter(|ours| ours.is_srgb() == srgb)
+                    .map(|ours| (f, ours))
+            })
+        };
+        let (wgpu_format, format) = pick(true).or_else(|| pick(false)).ok_or_else(|| {
+            RhiError::Surface(format!("no supported format in {:?}", caps.formats))
+        })?;
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
+            format: wgpu_format,
             color_space: wgpu::SurfaceColorSpace::Auto,
             width: width.max(1),
             height: height.max(1),
@@ -149,18 +177,51 @@ impl Rhi {
             surface,
             window,
             config,
+            format,
             vsync_version: R_VSYNC.version(),
             usable: false,
         };
         swapchain.resize(self, width, height);
         info!(?format, present_mode = ?swapchain.config.present_mode, "swapchain created");
-        swapchain
+        Ok(swapchain)
+    }
+
+    /// Harvests finished GPU work (timestamp readbacks) without blocking.
+    fn poll(&mut self) {
+        if let Err(e) = self.device.poll(wgpu::PollType::Poll) {
+            warn!(error = %e, "device poll failed");
+        }
+        if let Some(p) = &mut self.profiler {
+            p.collect();
+        }
+    }
+
+    fn new_frame(&mut self, view: wgpu::TextureView, size: (u32, u32)) -> Frame {
+        self.poll();
+        let queries = match &mut self.profiler {
+            Some(p) if R_GPU_TIMESTAMPS.get() => p.begin_frame(),
+            _ => None,
+        };
+        let encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Frame"),
+            });
+        Frame {
+            surface_texture: None,
+            view,
+            size,
+            encoder,
+            queries,
+            reconfigure_after_present: false,
+        }
     }
 
     /// Acquires the next backbuffer. `Ok(None)` means "skip this frame" (minimized, occluded,
     /// timed out, or the surface was just reconfigured).
-    pub fn begin_frame(&self, swapchain: &mut Swapchain) -> Result<Option<Frame>, RhiError> {
+    pub fn begin_frame(&mut self, swapchain: &mut Swapchain) -> Result<Option<Frame>, RhiError> {
         if !swapchain.usable {
+            self.poll();
             return Ok(None);
         }
         if swapchain.vsync_version != R_VSYNC.version() {
@@ -195,34 +256,119 @@ impl Rhi {
         let view = texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Frame"),
-            });
-        Ok(Some(Frame {
-            texture,
-            view,
-            encoder,
-            reconfigure_after_present: suboptimal,
-        }))
+        let mut frame = self.new_frame(view, swapchain.size());
+        frame.surface_texture = Some(texture);
+        frame.reconfigure_after_present = suboptimal;
+        Ok(Some(frame))
     }
 
     /// Submits the frame's commands and presents the backbuffer.
-    pub fn end_frame(&self, swapchain: &mut Swapchain, frame: Frame) {
+    pub fn end_frame(&mut self, swapchain: &mut Swapchain, frame: Frame) {
         let _span = info_span!("Rhi::Present").entered();
-        let Frame {
-            texture,
-            view,
-            encoder,
-            reconfigure_after_present,
-        } = frame;
-        drop(view);
-        self.queue.submit([encoder.finish()]);
-        self.queue.present(texture);
-        if reconfigure_after_present {
+        let reconfigure = frame.reconfigure_after_present;
+        if let Some(texture) = self.submit(frame) {
+            self.queue.present(texture);
+        }
+        if reconfigure {
             swapchain.surface.configure(&self.device, &swapchain.config);
         }
+    }
+
+    /// Starts a frame that renders into `target` instead of a window.
+    pub fn begin_offscreen_frame(&mut self, target: &Texture) -> Frame {
+        self.new_frame(target.view.clone(), target.size())
+    }
+
+    pub fn submit_offscreen(&mut self, frame: Frame) {
+        let _ = self.submit(frame);
+    }
+
+    fn submit(&mut self, frame: Frame) -> Option<wgpu::SurfaceTexture> {
+        let Frame {
+            surface_texture,
+            view,
+            mut encoder,
+            queries,
+            ..
+        } = frame;
+        drop(view);
+        let readback_slot = match (&mut self.profiler, queries) {
+            (Some(p), Some(q)) => p.end_frame(&mut encoder, q),
+            _ => None,
+        };
+        self.queue.submit([encoder.finish()]);
+        if let (Some(p), Some(slot)) = (&mut self.profiler, readback_slot) {
+            p.after_submit(slot);
+        }
+        surface_texture
+    }
+
+    /// Copies an RGBA8/BGRA8 texture back to the CPU as tightly packed rows. **Blocks** until
+    /// the GPU is done: for tests and tools only, never in the frame loop.
+    pub fn read_texture_rgba8(&self, texture: &Texture) -> Result<Vec<u8>, RhiError> {
+        let (width, height) = texture.size();
+        if texture.format().bytes_per_pixel() != 4 {
+            return Err(RhiError::Readback(format!(
+                "{:?} is not a 4-byte format",
+                texture.format()
+            )));
+        }
+        let row = width * 4;
+        let padded_row =
+            row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("TextureReadback"),
+            size: u64::from(padded_row * height),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture.inner,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([encoder.finish()]);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+            let _ = tx.send(r);
+        });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| RhiError::Readback(e.to_string()))?;
+        rx.recv()
+            .map_err(|e| RhiError::Readback(e.to_string()))?
+            .map_err(|e| RhiError::Readback(e.to_string()))?;
+
+        let mut pixels = Vec::with_capacity((row * height) as usize);
+        {
+            let view = buffer
+                .get_mapped_range(..)
+                .map_err(|e| RhiError::Readback(e.to_string()))?;
+            for y in 0..height as usize {
+                let start = y * padded_row as usize;
+                pixels.extend_from_slice(&view[start..start + row as usize]);
+            }
+        }
+        buffer.unmap();
+        Ok(pixels)
     }
 
     fn recreate_surface(&self, swapchain: &mut Swapchain) -> Result<(), RhiError> {
@@ -253,6 +399,11 @@ impl Swapchain {
         (self.config.width, self.config.height)
     }
 
+    /// Backbuffer format (sRGB when the surface offers one).
+    pub fn format(&self) -> TextureFormat {
+        self.format
+    }
+
     /// False while the window has zero area (minimized).
     pub fn is_presentable(&self) -> bool {
         self.usable
@@ -260,44 +411,79 @@ impl Swapchain {
 }
 
 impl Frame {
-    /// Clears the backbuffer. Temporary M0 entry point; real passes come from the render
-    /// graph (M5).
-    pub fn clear(&mut self, color: ClearColor) {
-        let _span = info_span!("Render::Clear").entered();
-        let [r, g, b, a] = color.0.map(f64::from);
-        let _pass = self.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Clear"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &self.view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a }),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
+    /// Size of the frame's color target in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    /// Begins a labeled, timestamped pass. The color attachment is the frame's target.
+    pub fn render_pass(&mut self, desc: &RenderPassDesc<'_>) -> RenderPass<'_> {
+        let span = info_span!("Render::Pass", pass = desc.label).entered();
+        let Frame {
+            view,
+            encoder,
+            queries,
+            ..
+        } = self;
+        let mut queries = queries.as_mut();
+        let timestamp_writes = queries.as_mut().and_then(|q| q.pass_writes(desc.label));
+        let color = desc.color.map(|load| wgpu::RenderPassColorAttachment {
+            view: &*view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: load_color(load),
+                store: wgpu::StoreOp::Store,
+            },
+        });
+        let inner = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(desc.label),
+            color_attachments: &[color],
+            depth_stencil_attachment: desc.depth.map(|d| wgpu::RenderPassDepthStencilAttachment {
+                view: &d.texture.view,
+                depth_ops: Some(wgpu::Operations {
+                    load: load_depth(d.load),
+                    store: if d.store {
+                        wgpu::StoreOp::Store
+                    } else {
+                        wgpu::StoreOp::Discard
+                    },
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes,
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        RenderPass {
+            inner,
+            queries,
+            _span: span,
+        }
     }
 }
 
-/// Prefers a discrete GPU that can present to `surface`; falls back to wgpu's
+fn create_instance() -> wgpu::Instance {
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+    desc.flags = wgpu::InstanceFlags::from_build_config().with_env();
+    wgpu::Instance::new(desc)
+}
+
+/// Prefers a discrete GPU (that can present to `surface`, if given); falls back to wgpu's
 /// HighPerformance pick. Logs every adapter so hybrid-GPU problems are visible.
 fn pick_adapter(
     instance: &wgpu::Instance,
-    surface: &wgpu::Surface<'_>,
+    surface: Option<&wgpu::Surface<'_>>,
 ) -> Result<wgpu::Adapter, RhiError> {
     let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+    let presentable = |a: &wgpu::Adapter| surface.is_none_or(|s| a.is_surface_supported(s));
     for a in &adapters {
         let info = a.get_info();
         info!(
             gpu = %info.name,
             kind = ?info.device_type,
             backend = ?info.backend,
-            presentable = a.is_surface_supported(surface),
+            presentable = presentable(a),
             "found adapter"
         );
     }
@@ -305,10 +491,10 @@ fn pick_adapter(
     let allow_integrated = R_ALLOW_INTEGRATED_GPU.get();
     if !allow_integrated {
         // Among discrete adapters, take the first one from wgpu's preferred backend order.
-        if let Some(a) = adapters.iter().find(|a| {
-            a.get_info().device_type == wgpu::DeviceType::DiscreteGpu
-                && a.is_surface_supported(surface)
-        }) {
+        if let Some(a) = adapters
+            .iter()
+            .find(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu && presentable(a))
+        {
             return Ok(a.clone());
         }
     }
@@ -321,7 +507,7 @@ fn pick_adapter(
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference,
         force_fallback_adapter: false,
-        compatible_surface: Some(surface),
+        compatible_surface: surface,
         ..Default::default()
     }))
     .map_err(|e| RhiError::NoAdapter(e.to_string()))?;

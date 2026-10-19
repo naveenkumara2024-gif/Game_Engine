@@ -11,7 +11,7 @@ use raw_window_handle::{
 };
 use tracing::info;
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{DeviceEvent, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 
 #[derive(Clone, Debug)]
@@ -71,6 +71,17 @@ impl HasDisplayHandle for Window {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+    Other(u16),
+}
+
+/// Approximate pixels per wheel "line" for devices that report pixel deltas (touchpads).
+const PIXELS_PER_LINE: f64 = 40.0;
+
 /// OS events the engine cares about. Grows with input mapping in M2.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlatformEvent {
@@ -88,6 +99,20 @@ pub enum PlatformEvent {
         key: String,
         pressed: bool,
         repeat: bool,
+    },
+    MouseButton {
+        button: MouseButton,
+        pressed: bool,
+    },
+    /// Raw relative mouse motion in device units, unaffected by cursor acceleration or the
+    /// window edge (what camera controls want).
+    MouseMotion {
+        dx: f64,
+        dy: f64,
+    },
+    /// Wheel movement in lines; positive is away from the user.
+    MouseWheel {
+        lines: f32,
     },
 }
 
@@ -187,6 +212,19 @@ impl ApplicationHandler for Runner<'_> {
         }
     }
 
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device: winit::event::DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event
+            && self.initialized
+        {
+            self.app.event(PlatformEvent::MouseMotion { dx, dy });
+        }
+    }
+
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         if self.init_error.is_none() {
             self.app.shutdown();
@@ -205,6 +243,23 @@ fn translate(event: &WindowEvent) -> Option<PlatformEvent> {
         },
         WindowEvent::CloseRequested => PlatformEvent::CloseRequested,
         WindowEvent::Focused(f) => PlatformEvent::Focused(*f),
+        WindowEvent::MouseInput { state, button, .. } => PlatformEvent::MouseButton {
+            button: match button {
+                winit::event::MouseButton::Left => MouseButton::Left,
+                winit::event::MouseButton::Right => MouseButton::Right,
+                winit::event::MouseButton::Middle => MouseButton::Middle,
+                winit::event::MouseButton::Back => MouseButton::Other(3),
+                winit::event::MouseButton::Forward => MouseButton::Other(4),
+                winit::event::MouseButton::Other(n) => MouseButton::Other(*n),
+            },
+            pressed: state.is_pressed(),
+        },
+        WindowEvent::MouseWheel { delta, .. } => PlatformEvent::MouseWheel {
+            lines: match delta {
+                MouseScrollDelta::LineDelta(_, y) => *y,
+                MouseScrollDelta::PixelDelta(p) => (p.y / PIXELS_PER_LINE) as f32,
+            },
+        },
         WindowEvent::KeyboardInput { event, .. } => {
             let winit::keyboard::PhysicalKey::Code(code) = event.physical_key else {
                 return None;

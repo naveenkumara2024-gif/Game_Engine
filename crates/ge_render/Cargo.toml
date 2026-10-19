@@ -1,0 +1,27 @@
+[package]
+name = "ge_render"
+description = "Renderer: camera, meshes, uniforms, passes. Talks to the GPU only through ge_rhi (law 12)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["hot-reload"]
+hot-reload = ["ge_shader/hot-reload"]
+
+[dependencies]
+ge_core.workspace = true
+ge_rhi.workspace = true
+ge_shader.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+image.workspace = true
+
+[lints]
+workspace = true

@@ -1,6 +1,8 @@
 //! Engine loop (lore §3.3, §6.3). Owns startup → loop → shutdown; games and tools are
 //! libraries that call [`run`]. `App`/`Plugin`/tick-group schedules arrive in M2.
 
+mod orbit_camera;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -8,13 +10,17 @@ use std::time::{Duration, Instant};
 const MINIMIZED_TICK: Duration = Duration::from_millis(16);
 
 use ge_platform::{PlatformApp, PlatformContext, PlatformEvent, Window, WindowDesc};
-use ge_rhi::{ClearColor, Rhi, Swapchain};
-use tracing::{error, info, info_span, warn};
+use ge_render::{RenderView, Renderer, demo};
+use ge_rhi::{Rhi, Swapchain};
+use ge_shader::ShaderLibrary;
+use tracing::{debug, error, info, info_span, warn};
+
+use crate::orbit_camera::OrbitCamera;
 
 pub use ge_platform::WindowDesc as WindowConfig;
 
 ge_core::declare_cvar!(pub static R_CLEAR_COLOR: [f32; 3] =
-    ("r.ClearColor", [0.10, 0.20, 0.40], "Backbuffer clear color, linear RGB (M0 test hook)"));
+    ("r.ClearColor", [0.10, 0.20, 0.40], "Background color behind the scene, linear RGB"));
 
 #[derive(Clone, Debug, Default)]
 pub struct EngineConfig {
@@ -47,6 +53,7 @@ pub fn run(config: EngineConfig) -> Result<(), EngineError> {
 struct Gpu {
     rhi: Rhi,
     swapchain: Swapchain,
+    renderer: Renderer,
 }
 
 struct Engine {
@@ -56,8 +63,10 @@ struct Engine {
     /// Set by [`Engine::request_exit`]; polled once per tick (UE's `RequestEngineExit`).
     exit_reason: Option<String>,
     frame: u64,
+    start: Instant,
     last_tick: Instant,
     stats: FrameStats,
+    camera: OrbitCamera,
 }
 
 impl Engine {
@@ -68,8 +77,10 @@ impl Engine {
             gpu: None,
             exit_reason: None,
             frame: 0,
+            start: Instant::now(),
             last_tick: Instant::now(),
             stats: FrameStats::default(),
+            camera: OrbitCamera::new(demo::demo_camera()),
         }
     }
 
@@ -82,17 +93,32 @@ impl Engine {
     }
 
     fn render(&mut self) {
-        let Some(gpu) = &mut self.gpu else { return };
-        if !gpu.swapchain.is_presentable() {
+        let Some(Gpu {
+            rhi,
+            swapchain,
+            renderer,
+        }) = &mut self.gpu
+        else {
+            return;
+        };
+        // Shader hot reload runs even while minimized, so edits are picked up on restore.
+        renderer.update(rhi);
+        if !swapchain.is_presentable() {
             // Minimized: nothing to draw, so don't spin a core at millions of ticks/s.
             std::thread::sleep(MINIMIZED_TICK);
             return;
         }
-        match gpu.rhi.begin_frame(&mut gpu.swapchain) {
+        match rhi.begin_frame(swapchain) {
             Ok(Some(mut frame)) => {
-                let [r, g, b] = R_CLEAR_COLOR.get();
-                frame.clear(ClearColor([r, g, b, 1.0]));
-                gpu.rhi.end_frame(&mut gpu.swapchain, frame);
+                // M1 has no world yet: the demo scene stands in for extracted render proxies.
+                let time = self.start.elapsed().as_secs_f32();
+                let view = RenderView {
+                    camera: self.camera.camera(),
+                    time,
+                    clear_color: R_CLEAR_COLOR.get(),
+                };
+                renderer.render(rhi, &mut frame, &view, &demo::demo_scene(time));
+                rhi.end_frame(swapchain, frame);
             }
             Ok(None) => {}
             Err(e) => {
@@ -108,13 +134,24 @@ impl PlatformApp for Engine {
         let _span = info_span!("Engine::init").entered();
         let window = ctx.create_window(&self.config.window)?;
         let (rhi, swapchain) = Rhi::new(window.clone(), window.size())?;
+        let mut shaders = ShaderLibrary::new(ShaderLibrary::default_root());
+        if let Err(e) = shaders.watch() {
+            warn!(error = %e, "shader hot reload unavailable");
+        }
+        let renderer = Renderer::new(&rhi, swapchain.format(), shaders);
         self.window = Some(window);
-        self.gpu = Some(Gpu { rhi, swapchain });
+        self.gpu = Some(Gpu {
+            rhi,
+            swapchain,
+            renderer,
+        });
+        self.start = Instant::now();
         self.last_tick = Instant::now();
         Ok(())
     }
 
     fn event(&mut self, event: PlatformEvent) {
+        self.camera.event(&event);
         match event {
             PlatformEvent::CloseRequested => self.request_exit("window closed"),
             PlatformEvent::Resized { width, height } => {
@@ -142,11 +179,21 @@ impl PlatformApp for Engine {
         if let Some(window) = &self.window
             && let Some(avg) = self.stats.push(dt)
         {
-            let ms = avg.as_secs_f64() * 1000.0;
+            // GPU time comes from timestamps, not fps: on this laptop presentation is capped by
+            // the cross-adapter copy (CLAUDE.md §9).
+            let timings = self.gpu.as_ref().and_then(|g| g.rhi.gpu_timings());
+            let gpu_ms =
+                timings.map_or_else(|| "n/a".to_owned(), |t| format!("{:.2} ms", t.total_ms));
+            debug!(
+                cpu_ms = avg.as_secs_f64() * 1000.0,
+                gpu = ?timings.map(|t| &t.passes),
+                "frame stats"
+            );
             window.set_title(&format!(
-                "{} — {ms:.2} ms ({:.0} fps)",
+                "{} — CPU {:.2} ms | GPU {gpu_ms} | {:.0} fps",
                 self.config.window.title,
-                1000.0 / ms
+                avg.as_secs_f64() * 1000.0,
+                1.0 / avg.as_secs_f64()
             ));
         }
 
