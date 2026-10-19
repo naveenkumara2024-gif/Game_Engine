@@ -1,0 +1,19 @@
+[package]
+name = "ge_rhi"
+description = "Render Hardware Interface: the only crate allowed to touch the graphics API (law 12)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ge_core.workspace = true
+wgpu.workspace = true
+raw-window-handle.workspace = true
+pollster.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

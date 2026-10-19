@@ -1,0 +1,59 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*", "xtask"]
+default-members = ["crates/*", "apps/*"]
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# engine crates
+ge_core = { path = "crates/ge_core" }
+ge_platform = { path = "crates/ge_platform" }
+ge_rhi = { path = "crates/ge_rhi" }
+ge_engine = { path = "crates/ge_engine" }
+
+# third party (CLAUDE.md §4)
+wgpu = "30.0.1"
+winit = "0.30.13"
+raw-window-handle = "0.6.2"
+glam = "0.34.1"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-tracy = "0.12.0"
+inventory = "0.3.25"
+thiserror = "2.0.21"
+anyhow = "1.0.104"
+mimalloc = "0.1.52"
+pollster = "1.0.1"
+cargo_metadata = "0.23.1"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Profiles — lore §6.11
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 16
+
+[profile.shipping]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

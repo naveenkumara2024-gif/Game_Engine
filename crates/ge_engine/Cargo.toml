@@ -1,0 +1,21 @@
+[package]
+name = "ge_engine"
+description = "Engine loop: startup phases, tick, cooperative exit. Games never write their own loop."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+tracy = ["ge_core/tracy"]
+
+[dependencies]
+ge_core.workspace = true
+ge_platform.workspace = true
+ge_rhi.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

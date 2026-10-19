@@ -1,0 +1,21 @@
+[package]
+name = "ge_core"
+description = "Engine core: handles, names, cvars, logging. Depends on no other ge_* crate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+tracy = ["dep:tracing-tracy"]
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-tracy = { workspace = true, optional = true }
+inventory.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

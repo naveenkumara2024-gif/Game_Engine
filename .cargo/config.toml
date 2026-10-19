@@ -1,0 +1,6 @@
+[alias]
+xtask = "run --package xtask --"
+
+# Fast linking on Windows (lore §6.11).
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"

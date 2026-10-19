@@ -1,0 +1,21 @@
+[package]
+name = "game"
+description = "Runtime binary. Thin: builds the engine config and calls ge_engine::run."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+tracy = ["ge_engine/tracy"]
+# Placeholder until M10: hides the console window. Editor/cheat stripping lands later.
+shipping = []
+
+[dependencies]
+ge_engine.workspace = true
+mimalloc.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true
