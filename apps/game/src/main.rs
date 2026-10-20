@@ -1,5 +1,7 @@
 #![cfg_attr(feature = "shipping", windows_subsystem = "windows")]
 
+use ge_engine::prelude::*;
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc; // UE: FMallocBinned2 / mimalloc (lore §2.10)
 
@@ -14,12 +16,13 @@ pub static NvOptimusEnablement: u32 = 1;
 pub static AmdPowerXpressRequestHighPerformance: i32 = 1;
 
 fn main() -> anyhow::Result<()> {
-    ge_engine::run(ge_engine::EngineConfig {
-        window: ge_engine::WindowConfig {
-            title: "Game_Engine".into(),
+    App::new()
+        .set_window(WindowDesc {
+            title: "Game_Engine — Arena".into(),
             ..Default::default()
-        },
-        args: std::env::args().collect(),
-    })?;
+        })
+        .add_plugins(DefaultPlugins)
+        .add_plugins(sample::SamplePlugin)
+        .run()?;
     Ok(())
 }

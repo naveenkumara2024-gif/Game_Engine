@@ -14,6 +14,7 @@ hot-reload = ["ge_shader/hot-reload"]
 [dependencies]
 ge_core.workspace = true
 ge_rhi.workspace = true
+ge_ecs.workspace = true
 ge_shader.workspace = true
 glam.workspace = true
 bytemuck.workspace = true

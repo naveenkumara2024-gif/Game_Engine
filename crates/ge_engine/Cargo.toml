@@ -9,7 +9,7 @@ publish.workspace = true
 
 [features]
 default = ["hot-reload"]
-tracy = ["ge_core/tracy", "ge_rhi/tracy"]
+tracy = ["ge_core/tracy", "ge_rhi/tracy", "ge_ecs/trace"]
 # Shader hot reload (dev). `shipping` will turn this off (M10).
 hot-reload = ["ge_render/hot-reload"]
 
@@ -19,7 +19,7 @@ ge_platform.workspace = true
 ge_rhi.workspace = true
 ge_shader.workspace = true
 ge_render.workspace = true
-glam.workspace = true
+ge_ecs.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 

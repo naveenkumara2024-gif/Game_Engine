@@ -56,14 +56,18 @@ fn check_layers() -> Result<()> {
         .map(|p| p.name.as_str())
         .collect();
     let mut edges = Vec::new();
+    let mut external = Vec::new();
     for pkg in metadata.workspace_packages() {
         for dep in &pkg.dependencies {
             if members.contains(&dep.name.as_str()) {
                 edges.push((pkg.name.to_string(), dep.name.clone()));
+            } else {
+                external.push((pkg.name.to_string(), dep.name.clone()));
             }
         }
     }
-    let violations = layers::check(&edges);
+    let mut violations = layers::check(&edges);
+    violations.extend(layers::check_external(&external));
     if violations.is_empty() {
         println!("xtask check-layers: {} workspace edges OK", edges.len());
         return Ok(());
@@ -128,6 +132,23 @@ mod layers {
         out
     }
 
+    /// Third-party crates that only their facade crate may name (CLAUDE.md §4: bevy stays
+    /// behind `ge_ecs`, wgpu behind `ge_rhi`; law 12).
+    const FACADES: &[(&str, &str)] = &[("bevy_", "ge_ecs"), ("wgpu", "ge_rhi")];
+
+    pub fn check_external(deps: &[(String, String)]) -> Vec<String> {
+        deps.iter()
+            .filter_map(|(from, to)| {
+                let (prefix, owner) = FACADES.iter().find(|(p, _)| to.starts_with(p))?;
+                (from != owner).then(|| {
+                    format!(
+                        "`{from}` must not depend on `{to}`; only `{owner}` may use `{prefix}*`"
+                    )
+                })
+            })
+            .collect()
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -156,6 +177,18 @@ mod layers {
             assert_eq!(check(&e(&[("ge_core", "ge_rhi")])).len(), 1);
             assert_eq!(check(&e(&[("ge_render", "ge_editor")])).len(), 1);
             assert_eq!(check(&e(&[("ge_rhi", "ge_tasks")])).len(), 1, "same layer");
+        }
+
+        #[test]
+        fn facade_crates_are_exclusive() {
+            let ok = e(&[
+                ("ge_ecs", "bevy_ecs"),
+                ("ge_rhi", "wgpu"),
+                ("ge_render", "glam"),
+            ]);
+            assert!(check_external(&ok).is_empty());
+            let bad = e(&[("sample", "bevy_ecs"), ("ge_render", "wgpu")]);
+            assert_eq!(check_external(&bad).len(), 2);
         }
 
         #[test]

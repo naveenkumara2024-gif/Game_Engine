@@ -1,0 +1,18 @@
+[package]
+name = "sample"
+description = "Vertical-slice game (third-person arena, CLAUDE.md §1) as a plugin. Defines 'done' for every subsystem."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ge_engine.workspace = true
+
+[dev-dependencies]
+ge_platform.workspace = true
+ge_render.workspace = true
+
+[lints]
+workspace = true

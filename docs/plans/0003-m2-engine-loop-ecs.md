@@ -1,6 +1,14 @@
 # 0003 — M2: Engine loop + ECS
 
-**Status:** proposed 2026-10-19 · **Milestone:** M2 (CLAUDE.md §9, lore §8)
+**Status:** done 2026-10-19 · **Milestone:** M2 (CLAUDE.md §9, lore §8)
+
+**Deviations from this plan:**
+- **Transform propagation walks the whole hierarchy every frame** instead of only changed subtrees. It writes a `GlobalTransform` only when the value changes (`set_if_neq`), so downstream change detection still works. This keeps reparenting, detaching and despawned parents correct without dirty-bit bookkeeping. Cost is O(transforms); revisit at M5 when scenes grow.
+- **The engine is split into extra modules:** `runner.rs` (window/GPU glue, moved out of `lib.rs`) and `plugins.rs` (`InputPlugin`, `TransformPlugin`, `RenderPlugin`, `DefaultPlugins`). `App::run` takes `&mut self` so `App::new().add_plugins(..).run()` chains; `App::set_window` sets the title and size.
+- **The layering check also enforces facades:** only `ge_ecs` may depend on `bevy_*`, and only `ge_rhi` on `wgpu` (law 12). It runs as part of `cargo xtask check-layers`.
+- **bevy_ecs 0.20 doesn't export `ExecutorKind`.** Schedules are single-threaded because the `multi_threaded` feature is off, so nothing needs setting.
+- **Sample scene:** the M1 5×5 grid became a 6-cube spinning cluster (a parent `Spin` with spinning children), alongside a ring of 10 pillars. The player's body turns to face its movement direction.
+- **Headless sample test** (`games/sample/tests/headless.rs`): it drives the real plugin stack with synthetic key events. It checks that W moves the player away from the camera at the same speed at 30 and 144 fps, that children stay attached, that extract counts every item, and that Escape quits.
 
 ## Goal
 
@@ -14,7 +22,7 @@ M2 is done when `apps/game` is just `App::new().add_plugins(DefaultPlugins).add_
 
 ## Current state
 
-M1 is done: `ge_rhi`, `ge_shader` and `ge_render` draw a list of `DrawItem`s. `ge_engine` owns the winit loop, the exit flag, an orbit camera and the hard-coded demo scene. **M1 isn't committed yet.**
+M1 is done: `ge_rhi`, `ge_shader` and `ge_render` draw a list of `DrawItem`s. `ge_engine` owns the winit loop, the exit flag, an orbit camera and the hard-coded demo scene. M1 stays uncommitted (your call).
 
 ## Decisions & assumptions (flagged)
 
@@ -22,11 +30,11 @@ M1 is done: `ge_rhi`, `ge_shader` and `ge_render` draw a list of `DrawItem`s. `g
    - `ge_ecs` (rank 5, → `ge_core`): wraps `bevy_ecs 0.20`. It holds the `Transform` / `GlobalTransform` components, the hierarchy, transform propagation, and the `Time` / `FixedTime` resources.
    - `games/sample` (`sample`, rank 10): the vertical-slice game, written as a plugin.
    - Both are added to xtask's rank table, and `games/*` joins the workspace members.
-2. **⚠ Facade over bevy_ecs: needs your OK, because it deviates from CLAUDE.md §4.** The rule says to "never re-export raw bevy types". Fully wrapping `Query` / `Commands` / `Res` / system params means re-implementing Bevy's system-param machinery, which is weeks of work and fights the borrow checker. My proposal:
+2. **Facade over bevy_ecs: curated prelude (approved 2026-10-19; deviates from the old CLAUDE.md §4 wording, which gets updated).** The rule says to "never re-export raw bevy types". Fully wrapping `Query` / `Commands` / `Res` / system params means re-implementing Bevy's system-param machinery, which is weeks of work and fights the borrow checker. My proposal:
    - **Our own types** for everything engine-shaped: `App`, `Plugin`, tick-group labels, `Transform`, `GlobalTransform`, `Time`, input actions and the exit request.
    - **A curated `ge_ecs::prelude`** that re-exports the ECS vocabulary: `Component`, `Resource`, `Entity`, `Query`, `Commands`, `Res`/`ResMut`, `With`/`Without`/`Changed`, `ChildOf`/`Children`, `IntoScheduleConfigs`.
    - **Game and engine crates depend on `ge_ecs` only, never on `bevy_ecs`.** Bevy's derives emit a bare `bevy_ecs::` path when the crate isn't in `Cargo.toml`, so the prelude carries a hidden `pub use bevy_ecs`. I verified this in `bevy_macro_utils` 0.20.
-   - **Result:** a Bevy upgrade touches `ge_ecs` plus whatever vocabulary Bevy itself changed. If you agree, I'll reword the CLAUDE.md §4 row to match.
+   - **Result:** a Bevy upgrade touches `ge_ecs` plus whatever vocabulary Bevy itself changed.
 3. **Single-threaded schedule executor for M2.** `bevy_ecs` uses `default-features = false, features = ["std"]`. That leaves out the `multi_threaded` feature, which would bring in Bevy's own thread pool next to our planned `rayon` pool, and leaves out `bevy_reflect`. Parallel system execution comes back with `ge_tasks` when there's real load (M5+). Bevy's `trace` feature (a span per system) turns on with our `tracy` feature.
 4. **Reflection (`ge_reflect`) is deferred to M6,** where the inspector is its first consumer. Law 4 says to reflect everything. Adding the derive to the handful of M2 components later is cheap, and pulling `bevy_reflect` in now costs compile time for no current user. **Flagged as a law-4 deferral.**
 5. **`App` and `Plugin` (in `ge_engine`):**
@@ -65,7 +73,7 @@ M1 is done: `ge_rhi`, `ge_shader` and `ge_render` draw a list of `DrawItem`s. `g
     - Cvar `t.MaxFps` (default 0 = uncapped; vsync still applies). When set, a sleep-then-short-spin limiter runs at the end of the tick.
     - Rust's `sleep` on Windows uses high-resolution waitable timers, so no FFI is needed.
     - The title bar keeps CPU/GPU ms.
-13. **Sample game = third-person arena:** the provisional default from CLAUDE.md §11, which must be settled at M2, **so please confirm.**
+13. **Sample game = third-person arena** (confirmed 2026-10-19; closes the CLAUDE.md §11 open decision).
     - `games/sample` spawns the arena floor, a few pillars and a **player** cube. The player has two child cubes ("shoulders") plus a grandchild that spins, which proves the hierarchy.
     - The camera has right-drag orbit and wheel zoom around the player.
     - A `PlayerController` system in `FixedUpdate` moves the player with WASD relative to the camera's yaw. `Escape` maps to `Quit`.
@@ -92,7 +100,7 @@ crates/ge_render/src/{lib.rs, components.rs}         # MeshRenderer, Camera3d, e
 games/sample/{Cargo.toml, src/lib.rs, src/player.rs, src/camera.rs, src/arena.rs} # new
 apps/game/src/main.rs                                # App::new()...run()
 xtask/src/main.rs                                    # rank: ge_ecs already 5; add `sample` path check
-CLAUDE.md §4 row (if decision 2 approved), §9 status, §11 (vertical slice settled)
+CLAUDE.md §4 ECS row, §9 status, §11 (vertical slice settled)
 ```
 
 ## Out of scope
@@ -101,9 +109,9 @@ Render thread, pipelined extract and the render graph (M5); assets (M3); reflect
 
 ## Acceptance criteria (M2 exit criteria)
 
-- [ ] `cargo xtask ci` passes, including the layering check with `ge_ecs` and `sample`. No crate except `ge_ecs` depends on `bevy_ecs`.
-- [ ] `apps/game/src/main.rs` contains no game logic: it builds an `App`, adds plugins and runs.
-- [ ] Unit tests:
+- [x] `cargo xtask ci` passes, including the layering check with `ge_ecs` and `sample`. No crate except `ge_ecs` depends on `bevy_ecs`.
+- [x] `apps/game/src/main.rs` contains no game logic: it builds an `App`, adds plugins and runs.
+- [x] Unit tests:
   - plugin dependency ordering, plus missing-dependency and cycle errors;
   - tick groups run in the CLAUDE.md §6 order;
   - the fixed-step accumulator (step count, max-steps clamp, overstep fraction);
@@ -111,9 +119,9 @@ Render thread, pipelined extract and the render graph (M5); assets (M3); reflect
   - input action edges (pressed/just_pressed/just_released, focus loss clears, WASD composite normalizes diagonals);
   - transform propagation for a three-level hierarchy, including reparenting;
   - `ExitRequest` keeps the first reason.
-- [ ] The golden-image test still passes (renderer output unchanged).
-- [ ] Manual: WASD moves the player relative to the camera, the children follow and the grandchild spins, right-drag orbits, the wheel zooms, Escape quits cleanly through `ExitRequest`.
-- [ ] Movement is frame-rate independent: the same distance per second at `-cvar t.MaxFps=30` as uncapped. A test drives the fixed step directly, and the manual check covers the rest.
+- [x] The golden-image test still passes (renderer output unchanged).
+- [x] Manual: WASD moves the player relative to the camera, the children follow and the grandchild spins, right-drag orbits, the wheel zooms, Escape quits cleanly through `ExitRequest`.
+- [x] Movement is frame-rate independent: the same distance per second at `-cvar t.MaxFps=30` as uncapped. A test drives the fixed step directly, and the manual check covers the rest.
 
 ## Manual test steps
 

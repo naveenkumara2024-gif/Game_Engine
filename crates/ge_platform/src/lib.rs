@@ -71,7 +71,7 @@ impl HasDisplayHandle for Window {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MouseButton {
     Left,
     Right,

@@ -60,7 +60,7 @@ Change any of these only through an approved plan.
 | Window / input | `winit` 0.30.x (`ApplicationHandler`), `gilrs` |
 | GPU | `wgpu` v30 **behind the `ge_rhi` trait**. Request `PowerPreference::HighPerformance`. |
 | Shaders | WGSL + **WESL** (`@if` permutations), compiled with `naga`/`wesl`; files in `shaders/*.wesl` |
-| ECS | `bevy_ecs` standalone, wrapped by `ge_ecs` (never re-export raw bevy types from public APIs) |
+| ECS | `bevy_ecs` standalone, behind `ge_ecs`. Engine-shaped types are ours (`App`, `Plugin`, `TickGroup`, `Transform`, `Time`, input). The ECS vocabulary (`Query`, `Commands`, `Res`, derives) is a curated re-export in `ge_ecs::prelude`. **Only `ge_ecs` may list `bevy_*` in `Cargo.toml`**; `cargo xtask check-layers` enforces it (plan 0003). |
 | Math | `glam` |
 | Reflection | `bevy_reflect` + our derive macros in `ge_reflect_derive` |
 | Serialization | `serde` + `ron` (authoring), `rkyv` (cooked), `postcard` (compact binary) |
@@ -214,7 +214,7 @@ Windows setup:
 
 ## 9. Roadmap and status
 
-Full exit criteria are in lore §8. **Current status: M1 done (2026-10-19), next up M2.** The Tracy GPU-zone check is still manual (needs the Tracy GUI). Crates so far: `ge_core`, `ge_platform`, `ge_rhi`, `ge_shader`, `ge_render`, `ge_engine`, `apps/game` and `xtask` (plans: `docs/plans/0001`, `0002`).
+Full exit criteria are in lore §8. **Current status: M2 done (2026-10-19), next up M3.** The Tracy GPU-zone check from M1 is still manual (needs the Tracy GUI). Crates so far: `ge_core`, `ge_platform`, `ge_rhi`, `ge_shader`, `ge_ecs`, `ge_render`, `ge_engine`, `games/sample`, `apps/game` and `xtask` (plans: `docs/plans/0001`–`0003`).
 
 **Known machine quirk:** this hybrid laptop's panel (1920 wide, 144 Hz) is driven by the Radeon, so frames rendered on the RTX 3050 are copied across adapters. On the **"Silent"** power plan the dGPU capped at about 45 fps even for a clear-only frame. On **"Turbo"** it runs at the full 144 Hz (6.94 ms) on both Vulkan and D3D12. Always benchmark on Turbo. Windowed Mailbox is still capped at the refresh rate by the cross-adapter copy, so measure GPU cost with GPU timestamps (M1), not fps.
 
@@ -268,7 +268,7 @@ These come from lore Appendix C. Work proceeds on the default. Confirm each with
 | Decision | Provisional default | Must be settled by |
 |---|---|---|
 | Engine name / crate prefix | `ge_` placeholder | before M0 publishes crate names |
-| Vertical-slice game | small third-person arena (lore §8) | M2 |
+| Vertical-slice game | **Settled 2026-10-19:** small third-person arena (`games/sample`) | ~~M2~~ done |
 | GPU backend | wgpu only; native D3D12/Vulkan considered after M12 | M12 |
 | Platforms | Windows first; keep WASM/WebGPU compiling where it's cheap | M3 |
 | Scripting | Rust hot patch only; Lua (`mlua`) vs WASM (`wasmtime`) decided at M11 | M11 |

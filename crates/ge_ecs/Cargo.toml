@@ -1,0 +1,21 @@
+[package]
+name = "ge_ecs"
+description = "World/ECS facade over bevy_ecs: prelude, transforms + hierarchy, time. The only crate that names bevy_ecs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# One tracing span per system (shows up in Tracy).
+trace = ["bevy_ecs/trace"]
+
+[dependencies]
+ge_core.workspace = true
+bevy_ecs.workspace = true
+glam.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

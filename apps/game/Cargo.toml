@@ -1,6 +1,6 @@
 [package]
 name = "game"
-description = "Runtime binary. Thin: builds the engine config and calls ge_engine::run."
+description = "Runtime binary. Thin: builds the App, adds the engine and game plugins, runs."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,6 +14,7 @@ shipping = []
 
 [dependencies]
 ge_engine.workspace = true
+sample.workspace = true
 mimalloc.workspace = true
 anyhow.workspace = true
 
