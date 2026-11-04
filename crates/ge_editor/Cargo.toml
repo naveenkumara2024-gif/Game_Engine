@@ -11,6 +11,7 @@ publish.workspace = true
 ge_core.workspace = true
 ge_ecs.workspace = true
 ge_render.workspace = true
+ge_asset.workspace = true
 ge_engine.workspace = true
 egui.workspace = true
 transform-gizmo-egui.workspace = true

@@ -11,9 +11,11 @@ pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 3],
+    /// Texture coordinate (glTF convention: origin top-left, V down).
+    pub uv: [f32; 2],
 }
 
-const VERTEX_ATTRIBUTES: [VertexAttribute; 3] = [
+const VERTEX_ATTRIBUTES: [VertexAttribute; 4] = [
     VertexAttribute {
         location: 0,
         offset: 0,
@@ -28,6 +30,11 @@ const VERTEX_ATTRIBUTES: [VertexAttribute; 3] = [
         location: 2,
         offset: 24,
         format: VertexFormat::Float32x3,
+    },
+    VertexAttribute {
+        location: 3,
+        offset: 36,
+        format: VertexFormat::Float32x2,
     },
 ];
 
@@ -79,11 +86,12 @@ impl MeshData {
 
     fn push_quad(&mut self, center: Vec3, u: Vec3, v: Vec3, normal: Vec3, color: [f32; 3]) {
         let base = self.vertices.len() as u32;
-        for (su, sv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        for (su, sv) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
             self.vertices.push(Vertex {
                 position: (center + u * su + v * sv).to_array(),
                 normal: normal.to_array(),
                 color,
+                uv: [(su + 1.0) * 0.5, (1.0 - sv) * 0.5],
             });
         }
         self.indices
@@ -174,6 +182,6 @@ mod tests {
 
     #[test]
     fn vertex_layout_matches_struct() {
-        assert_eq!(Vertex::LAYOUT.stride, 36);
+        assert_eq!(Vertex::LAYOUT.stride, 44);
     }
 }

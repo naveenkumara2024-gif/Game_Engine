@@ -12,8 +12,9 @@ fn main() -> Result<()> {
     match cmd.as_str() {
         "ci" => ci(),
         "check-layers" => check_layers(),
+        "gen-assets" => gen_assets(),
         _ => {
-            eprintln!("usage: cargo xtask <ci | check-layers>");
+            eprintln!("usage: cargo xtask <ci | check-layers | gen-assets>");
             std::process::exit(2);
         }
     }
@@ -32,6 +33,32 @@ fn ci() -> Result<()> {
     cargo(&["test", "--workspace"])?;
     check_layers()?;
     println!("xtask ci: all checks passed");
+    Ok(())
+}
+
+/// Writes the sample's generated assets (plan 0005, decision 13) into `assets/`. Our own
+/// generators, so the files carry no third-party license. `.meta` files are created on the
+/// next engine start and should be committed alongside.
+fn gen_assets() -> Result<()> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../assets");
+    let files: [(&str, Vec<u8>); 2] = [
+        ("models/crate.glb", ge_asset::fixtures::crate_glb()),
+        (
+            "textures/checker_bc1.ktx2",
+            ge_asset::fixtures::checker_bc1_ktx2(),
+        ),
+    ];
+    for (rel, bytes) in files {
+        let path = root.join(rel);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, &bytes)?;
+        println!("xtask gen-assets: wrote {rel} ({} bytes)", bytes.len());
+    }
+    // Create the .meta sidecars now so they can be committed with the files.
+    let registry = ge_asset::Registry::scan(&root);
+    println!("xtask gen-assets: {} assets registered", registry.len());
     Ok(())
 }
 

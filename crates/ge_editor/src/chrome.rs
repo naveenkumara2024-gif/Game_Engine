@@ -28,7 +28,7 @@ fn icon_button(ui: &mut egui::Ui, glyph: &str, selected: bool, tooltip: &str) ->
 
 /// The Add menu (shared by the tool bar button and Shift+A). Only categories that work are
 /// listed; asset import is shown greyed with its milestone.
-pub fn add_menu_contents(ui: &mut egui::Ui, ops: &mut Vec<Op>) {
+pub fn add_menu_contents(ui: &mut egui::Ui, world: &World, ops: &mut Vec<Op>) {
     ui.set_min_width(170.0);
     ui.menu_button(format!("{}  Mesh", icon::CUBE), |ui| {
         for shape in Primitive::ALL_DEFAULTS {
@@ -74,11 +74,34 @@ pub fn add_menu_contents(ui: &mut egui::Ui, ops: &mut Vec<Op>) {
         ui.close();
     }
     ui.separator();
+    let models = crate::actions::registry_models(world);
+    ui.menu_button(format!("{}  Model", icon::PACKAGE), |ui| {
+        if models.is_empty() {
+            ui.label(
+                RichText::new("Drop .glb / .gltf files into assets/").color(theme::TEXT_MUTED),
+            );
+        }
+        for (path, guid) in &models {
+            if ui
+                .button(format!("{}  {path}", icon::CUBE_TRANSPARENT))
+                .on_hover_text(format!("GUID {guid}"))
+                .clicked()
+            {
+                ops.push(Op::AddModel(*guid));
+                ui.close();
+            }
+        }
+    })
+    .response
+    .on_hover_text("Models found in assets/ (glTF). The list updates when files change.");
     ui.add_enabled(
         false,
-        egui::Button::new(format!("{}  Import glTF…", icon::PACKAGE)),
+        egui::Button::new(format!("{}  Import via file dialog…", icon::FOLDER_OPEN)),
     )
-    .on_disabled_hover_text("Planned (M3): the asset system loads .gltf/.glb meshes.");
+    .on_disabled_hover_text(
+        "Planned (M6): a file dialog and asset browser. For now, drop files into assets/ and \
+         pick them under Model.",
+    );
 }
 
 pub fn main_menu(ctx: &egui::Context, world: &mut World, ed: &mut Editor, ops: &mut Vec<Op>) {
@@ -116,7 +139,7 @@ pub fn main_menu(ctx: &egui::Context, world: &mut World, ed: &mut Editor, ops: &
                             ui.close();
                         }
                     });
-                    ui.menu_button("Add", |ui| add_menu_contents(ui, ops));
+                    ui.menu_button("Add", |ui| add_menu_contents(ui, world, ops));
                     ui.menu_button("View", |ui| {
                         ui.checkbox(&mut ed.ui.show_properties, "Properties (N)");
                         ui.checkbox(&mut ed.ui.show_outliner, "Outliner");
@@ -178,7 +201,7 @@ pub fn toolbar(ctx: &egui::Context, world: &mut World, ed: &mut Editor, ops: &mu
                     ui.add_enabled_ui(!playing, |ui| {
                         ui.menu_button(
                             RichText::new(format!("{}  Add", icon::PLUS)).size(14.0),
-                            |ui| add_menu_contents(ui, ops),
+                            |ui| add_menu_contents(ui, world, ops),
                         )
                         .response
                         .on_hover_text("Add mesh, light, camera or empty (Shift+A)");
@@ -519,7 +542,7 @@ pub fn toast(ctx: &egui::Context, ed: &mut Editor) {
 }
 
 /// Shift+A: the Add menu at the mouse.
-pub fn add_menu_popup(ctx: &egui::Context, ed: &mut Editor, ops: &mut Vec<Op>) {
+pub fn add_menu_popup(ctx: &egui::Context, world: &World, ed: &mut Editor, ops: &mut Vec<Op>) {
     let Some(at) = ed.ui.add_menu_at else { return };
     let area = egui::Area::new(egui::Id::new("add_popup"))
         .fixed_pos(at)
@@ -528,7 +551,7 @@ pub fn add_menu_popup(ctx: &egui::Context, ed: &mut Editor, ops: &mut Vec<Op>) {
             theme::panel_frame().show(ui, |ui| {
                 ui.label(RichText::new("Add").strong());
                 ui.separator();
-                add_menu_contents(ui, ops);
+                add_menu_contents(ui, world, ops);
             });
         });
     let clicked_outside = ctx.input(|i| i.pointer.any_pressed())
@@ -550,15 +573,30 @@ pub fn search(ctx: &egui::Context, world: &mut World, ed: &mut Editor, ops: &mut
         Op(Op),
         Setting(&'static settings::Setting),
     }
-    let q = query.to_lowercase();
+    // Every word must appear somewhere (Blender-style: "model crate" finds "Add › Model ›
+    // models/crate.glb").
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    let matches = |text: &str| {
+        let text = text.to_lowercase();
+        words.iter().all(|w| text.contains(w.as_str()))
+    };
     let mut hits: Vec<(String, String, Hit)> = Vec::new();
     for op in Op::searchable() {
-        if op.enabled(world, ed) && op.label().to_lowercase().contains(&q) {
+        if op.enabled(world, ed) && matches(&op.label()) {
             hits.push((op.label(), op.shortcut().to_owned(), Hit::Op(op)));
         }
     }
+    // Models in assets/ are searchable by file name.
+    if Op::AddEmpty.enabled(world, ed) {
+        for (path, guid) in crate::actions::registry_models(world) {
+            let label = format!("Add › Model › {path}");
+            if matches(&label) {
+                hits.push((label, "Shift A".to_owned(), Hit::Op(Op::AddModel(guid))));
+            }
+        }
+    }
     for s in settings::all_settings() {
-        if s.label.to_lowercase().contains(&q) || s.id.contains(&q) {
+        if matches(&format!("{} {} {}", setting_place(s.id), s.label, s.id)) {
             let place = setting_place(s.id);
             let badge = match s.status {
                 settings::Status::Live => "live".to_owned(),

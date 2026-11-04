@@ -106,7 +106,10 @@ impl Rhi {
             "selected GPU adapter"
         );
 
-        let required_features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+        // Timestamps for GPU timing; BC texture compression for cooked/KTX2 textures (every
+        // desktop GPU has it; without it compressed assets are rejected at load).
+        let required_features = adapter.features()
+            & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TEXTURE_COMPRESSION_BC);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("ge_device"),
             required_features,
@@ -137,6 +140,13 @@ impl Rhi {
 
     pub fn adapter(&self) -> &AdapterSummary {
         &self.summary
+    }
+
+    /// Whether BC1–BC7 compressed textures can be created on this device.
+    pub fn supports_bc(&self) -> bool {
+        self.device
+            .features()
+            .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
     }
 
     /// Most recent completed frame's per-pass GPU times (a few frames old), if measured.

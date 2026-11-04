@@ -189,6 +189,8 @@ impl UiRenderer {
                 label,
                 filter,
                 address: AddressMode::ClampToEdge,
+                mipmaps: false,
+                anisotropy: 1,
             })
         };
         let linear_sampler = sampler("UiLinear", FilterMode::Linear);

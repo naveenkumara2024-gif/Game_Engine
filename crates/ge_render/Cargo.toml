@@ -16,6 +16,7 @@ ge_core.workspace = true
 ge_rhi.workspace = true
 ge_ecs.workspace = true
 ge_shader.workspace = true
+ge_asset.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 tracing.workspace = true

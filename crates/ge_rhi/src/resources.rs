@@ -21,11 +21,60 @@ pub enum TextureFormat {
     Rgba16Float,
     /// Reversed-Z depth target (lore §6.7): clear to 0, compare `Greater`.
     Depth32Float,
+    /// Block-compressed (4×4 texel blocks). Need [`Rhi::supports_bc`].
+    Bc1RgbaUnorm,
+    Bc1RgbaUnormSrgb,
+    Bc3RgbaUnorm,
+    Bc3RgbaUnormSrgb,
+    Bc4RUnorm,
+    Bc5RgUnorm,
+    Bc7RgbaUnorm,
+    Bc7RgbaUnormSrgb,
 }
 
 impl TextureFormat {
     pub fn is_srgb(self) -> bool {
-        matches!(self, Self::Rgba8UnormSrgb | Self::Bgra8UnormSrgb)
+        matches!(
+            self,
+            Self::Rgba8UnormSrgb
+                | Self::Bgra8UnormSrgb
+                | Self::Bc1RgbaUnormSrgb
+                | Self::Bc3RgbaUnormSrgb
+                | Self::Bc7RgbaUnormSrgb
+        )
+    }
+
+    /// Bytes per 4×4 block for block-compressed formats, `None` otherwise.
+    pub fn block_bytes(self) -> Option<u32> {
+        match self {
+            Self::Bc1RgbaUnorm | Self::Bc1RgbaUnormSrgb | Self::Bc4RUnorm => Some(8),
+            Self::Bc3RgbaUnorm
+            | Self::Bc3RgbaUnormSrgb
+            | Self::Bc5RgUnorm
+            | Self::Bc7RgbaUnorm
+            | Self::Bc7RgbaUnormSrgb => Some(16),
+            _ => None,
+        }
+    }
+
+    pub fn is_compressed(self) -> bool {
+        self.block_bytes().is_some()
+    }
+
+    /// Bytes of one tightly packed mip level of `width` × `height` texels, plus the row pitch
+    /// and number of rows (block rows for compressed formats).
+    pub fn level_layout(self, width: u32, height: u32) -> (u32, u32, u32) {
+        match self.block_bytes() {
+            Some(block) => {
+                let bw = width.div_ceil(4).max(1);
+                let bh = height.div_ceil(4).max(1);
+                (bw * bh * block, bw * block, bh)
+            }
+            None => {
+                let row = width * self.bytes_per_pixel();
+                (row * height, row, height)
+            }
+        }
     }
 
     pub fn bytes_per_pixel(self) -> u32 {
@@ -33,6 +82,8 @@ impl TextureFormat {
             Self::Rgba8Unorm | Self::Rgba8UnormSrgb | Self::Bgra8Unorm | Self::Bgra8UnormSrgb => 4,
             Self::Depth32Float => 4,
             Self::Rgba16Float => 8,
+            // Per-texel size is meaningless for block formats; see `level_layout`.
+            _ => 0,
         }
     }
 
@@ -44,6 +95,14 @@ impl TextureFormat {
             Self::Bgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
             Self::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
             Self::Depth32Float => wgpu::TextureFormat::Depth32Float,
+            Self::Bc1RgbaUnorm => wgpu::TextureFormat::Bc1RgbaUnorm,
+            Self::Bc1RgbaUnormSrgb => wgpu::TextureFormat::Bc1RgbaUnormSrgb,
+            Self::Bc3RgbaUnorm => wgpu::TextureFormat::Bc3RgbaUnorm,
+            Self::Bc3RgbaUnormSrgb => wgpu::TextureFormat::Bc3RgbaUnormSrgb,
+            Self::Bc4RUnorm => wgpu::TextureFormat::Bc4RUnorm,
+            Self::Bc5RgUnorm => wgpu::TextureFormat::Bc5RgUnorm,
+            Self::Bc7RgbaUnorm => wgpu::TextureFormat::Bc7RgbaUnorm,
+            Self::Bc7RgbaUnormSrgb => wgpu::TextureFormat::Bc7RgbaUnormSrgb,
         }
     }
 
@@ -220,6 +279,10 @@ pub struct SamplerDesc<'a> {
     pub label: &'a str,
     pub filter: FilterMode,
     pub address: AddressMode,
+    /// Blend between mip levels (trilinear) instead of picking the nearest one.
+    pub mipmaps: bool,
+    /// Max anisotropy (1 = off). Only applies with linear filtering.
+    pub anisotropy: u16,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -317,11 +380,16 @@ pub struct Texture {
     pub(crate) view: wgpu::TextureView,
     size: (u32, u32),
     format: TextureFormat,
+    mip_levels: u32,
 }
 
 impl Texture {
     pub fn size(&self) -> (u32, u32) {
         self.size
+    }
+
+    pub fn mip_levels(&self) -> u32 {
+        self.mip_levels
     }
 
     pub fn format(&self) -> TextureFormat {
@@ -393,6 +461,11 @@ impl Rhi {
     }
 
     pub fn create_texture(&self, desc: &TextureDesc<'_>) -> Texture {
+        self.create_texture_mips(desc, 1)
+    }
+
+    /// A 2D texture with `mip_levels` levels (fill each with [`Rhi::write_texture_mip`]).
+    pub fn create_texture_mips(&self, desc: &TextureDesc<'_>, mip_levels: u32) -> Texture {
         let (width, height) = desc.size;
         let inner = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(desc.label),
@@ -401,7 +474,7 @@ impl Rhi {
                 height: height.max(1),
                 depth_or_array_layers: 1,
             },
-            mip_level_count: 1,
+            mip_level_count: mip_levels.max(1),
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: desc.format.to_wgpu(),
@@ -414,7 +487,49 @@ impl Rhi {
             view,
             size: (width.max(1), height.max(1)),
             format: desc.format,
+            mip_levels: mip_levels.max(1),
         }
+    }
+
+    /// Uploads one whole mip level (tightly packed rows, or blocks for compressed formats).
+    pub fn write_texture_mip(
+        &self,
+        texture: &Texture,
+        mip: u32,
+        data: &[u8],
+    ) -> Result<(), RhiError> {
+        let w = (texture.size.0 >> mip).max(1);
+        let h = (texture.size.1 >> mip).max(1);
+        let (bytes, row, rows) = texture.format.level_layout(w, h);
+        if mip >= texture.mip_levels || data.len() != bytes as usize {
+            return Err(RhiError::Upload(format!(
+                "mip {mip} of a {:?} {}x{} texture needs {bytes} bytes, got {}",
+                texture.format,
+                texture.size.0,
+                texture.size.1,
+                data.len()
+            )));
+        }
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture.inner,
+                mip_level: mip,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(rows),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        Ok(())
     }
 
     /// Uploads `data` (tightly packed rows, the texture's format) into the `size` rectangle at
@@ -470,6 +585,16 @@ impl Rhi {
                 address_mode_w: address,
                 mag_filter: filter,
                 min_filter: filter,
+                mipmap_filter: if desc.mipmaps {
+                    wgpu::MipmapFilterMode::Linear
+                } else {
+                    wgpu::MipmapFilterMode::Nearest
+                },
+                anisotropy_clamp: if desc.filter == FilterMode::Linear && desc.mipmaps {
+                    desc.anisotropy.clamp(1, 16)
+                } else {
+                    1
+                },
                 ..Default::default()
             }),
         }

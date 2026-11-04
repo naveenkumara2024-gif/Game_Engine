@@ -22,6 +22,8 @@ pub enum Op {
     AddLight(LightKind),
     AddCamera,
     AddEmpty,
+    /// A model from the asset registry, by GUID (survives renames).
+    AddModel(ge_asset::Uuid),
     Delete,
     Duplicate,
     HideSelected,
@@ -52,6 +54,7 @@ impl Op {
             Op::AddLight(k) => format!("Add › Light › {}", k.label()),
             Op::AddCamera => "Add › Camera".into(),
             Op::AddEmpty => "Add › Empty".into(),
+            Op::AddModel(_) => "Add › Model".into(),
             Op::Delete => "Delete".into(),
             Op::Duplicate => "Duplicate".into(),
             Op::HideSelected => "Hide Selected".into(),
@@ -81,7 +84,9 @@ impl Op {
 
     pub fn shortcut(self) -> &'static str {
         match self {
-            Op::AddMesh(_) | Op::AddLight(_) | Op::AddCamera | Op::AddEmpty => "Shift A",
+            Op::AddMesh(_) | Op::AddLight(_) | Op::AddCamera | Op::AddEmpty | Op::AddModel(_) => {
+                "Shift A"
+            }
             Op::Delete => "X / Del",
             Op::Duplicate => "Shift D",
             Op::HideSelected => "H",
@@ -118,9 +123,12 @@ impl Op {
             Op::Undo => editing && ed.history.can_undo(),
             Op::Redo => editing && ed.history.can_redo(),
             Op::Stop => *world.resource::<SimulationState>() != SimulationState::Editing,
-            Op::AddMesh(_) | Op::AddLight(_) | Op::AddCamera | Op::AddEmpty | Op::UnhideAll => {
-                editing
-            }
+            Op::AddMesh(_)
+            | Op::AddLight(_)
+            | Op::AddCamera
+            | Op::AddEmpty
+            | Op::AddModel(_)
+            | Op::UnhideAll => editing,
             _ => true,
         }
     }
@@ -175,6 +183,7 @@ impl Op {
             Op::AddLight(kind) => add_light(world, ed, kind),
             Op::AddCamera => add_camera(world, ed),
             Op::AddEmpty => add_empty(world, ed),
+            Op::AddModel(guid) => add_model(world, ed, guid),
             Op::Delete => delete_selected(world, ed),
             Op::Duplicate => duplicate_selected(world, ed),
             Op::HideSelected => {
@@ -338,6 +347,49 @@ pub fn add_empty(world: &mut World, ed: &mut Editor) {
     finish_spawn(world, ed, e, "Add Empty".into());
 }
 
+/// Spawns an instance of a registry model at the spawn point (its parts appear once loaded).
+pub fn add_model(world: &mut World, ed: &mut Editor, guid: ge_asset::Uuid) {
+    let at = spawn_point(world, ed);
+    let Some(mut server) = world.get_resource_mut::<ge_asset::AssetServer>() else {
+        return;
+    };
+    let Some(handle) = server.load_guid::<ge_asset::ModelAsset>(guid, None) else {
+        ed.toast("That model is no longer in assets/");
+        return;
+    };
+    let stem = handle
+        .source()
+        .file_name()
+        .rsplit_once('.')
+        .map_or(handle.source().file_name(), |(s, _)| s)
+        .to_owned();
+    let label = format!("Add Model {}", handle.source());
+    let name = unique_name(world, &stem);
+    let e = world
+        .spawn((
+            Name::new(name),
+            Transform::from_translation(at),
+            ge_render::SceneRoot(handle),
+            Visibility::default(),
+            ViewportDisplay::default(),
+        ))
+        .id();
+    finish_spawn(world, ed, e, label);
+}
+
+/// Every model in the registry: `(file name, GUID)`, sorted by path.
+pub fn registry_models(world: &World) -> Vec<(String, ge_asset::Uuid)> {
+    world
+        .get_resource::<ge_asset::AssetServer>()
+        .map(|s| {
+            s.registry()
+                .models()
+                .map(|e| (e.path.source().to_owned(), e.guid))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn delete_selected(world: &mut World, ed: &mut Editor) {
     let Some(e) = ed.selected.take() else { return };
     let (name, _) = crate::state::describe(world, e);
@@ -406,13 +458,16 @@ fn frame_selected(world: &mut World, ed: &mut Editor) {
     let Some(global) = world.get::<GlobalTransform>(e).copied() else {
         return;
     };
-    let radius = world
+    let (center, half) = world
         .get::<MeshRenderer>(e)
-        .map(|m| (global.0.matrix3 * glam::Vec3A::from(m.mesh.half_extents())).length())
-        .unwrap_or(1.0)
+        .map_or((Vec3::ZERO, Vec3::splat(1.0)), |m| {
+            crate::state::mesh_bounds(world, &m.mesh)
+        });
+    let radius = (global.0.matrix3 * glam::Vec3A::from(half))
+        .length()
         .max(0.5);
     if let Some(mut cam) = world.get_mut::<EditorCamera>(ed.camera) {
-        cam.focus = global.translation();
+        cam.focus = global.0.transform_point3(center);
         cam.distance = (radius * 3.0).clamp(1.0, 500.0);
     }
 }

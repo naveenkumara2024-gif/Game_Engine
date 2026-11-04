@@ -1,0 +1,12 @@
+(
+    version: 1,
+    guid: "759d16ec-e19f-4b5d-9f61-4957a2729af7",
+    importer: "ktx2",
+    importer_version: 1,
+    settings: (
+        scale: 1.0,
+        flip_uvs: false,
+        generate_mips: true,
+        srgb: None,
+    ),
+)

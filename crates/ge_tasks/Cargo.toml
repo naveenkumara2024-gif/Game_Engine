@@ -1,0 +1,16 @@
+[package]
+name = "ge_tasks"
+description = "Task system: IO threads for blocking file work, a rayon pool for CPU work, pollable Task<T> results. No async runtime."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rayon.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

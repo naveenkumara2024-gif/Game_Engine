@@ -20,6 +20,8 @@ ge_rhi.workspace = true
 ge_shader.workspace = true
 ge_render.workspace = true
 ge_ecs.workspace = true
+ge_asset.workspace = true
+ge_tasks.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 

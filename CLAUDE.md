@@ -63,7 +63,8 @@ Change any of these only through an approved plan.
 | ECS | `bevy_ecs` standalone, behind `ge_ecs`. Engine-shaped types are ours (`App`, `Plugin`, `TickGroup`, `Transform`, `Time`, input). The ECS vocabulary (`Query`, `Commands`, `Res`, derives) is a curated re-export in `ge_ecs::prelude`. **Only `ge_ecs` may list `bevy_*` in `Cargo.toml`**; `cargo xtask check-layers` enforces it (plan 0003). |
 | Math | `glam` |
 | Reflection | `bevy_reflect` + our derive macros in `ge_reflect_derive` |
-| Serialization | `serde` + `ron` (authoring), `rkyv` (cooked), `postcard` (compact binary) |
+| Serialization | `serde` + `ron` (authoring, `.meta`), `rkyv` (cooked), `postcard` (compact binary, DDC) |
+| Assets / GUIDs | `uuid` v4 GUIDs in `.meta`; `blake3` DDC keys in `.ddc/` (gitignored); importers for glTF (`gltf`), PNG/JPEG (`image`), KTX2 (`ktx2`) in `ge_asset` (plan 0005) |
 | Parallelism | `rayon`, `crossbeam` channels, `parking_lot`; a small async executor for IO only |
 | Physics | `rapier3d` behind the `PhysicsBackend` trait |
 | Audio | `kira` on a dedicated audio thread |
@@ -214,7 +215,7 @@ Windows setup:
 
 ## 9. Roadmap and status
 
-Full exit criteria are in lore §8. **Current status: M2 done (2026-10-19); editor shell v0 (plan 0004, a slice of M6 plus lighting v0 from M4) done ahead of M3 (2026-11-04); next up M3.** The Tracy GPU-zone check from M1 is still manual (needs the Tracy GUI). Crates so far: `ge_core`, `ge_platform`, `ge_rhi`, `ge_shader`, `ge_ecs`, `ge_render`, `ge_engine`, `ge_editor`, `games/sample`, `apps/game`, `apps/editor` and `xtask` (plans: `docs/plans/0001`–`0004`).
+Full exit criteria are in lore §8. **Current status: M3 done (2026-11-04); editor shell v0 (plan 0004, a slice of M6 plus lighting v0 from M4) also done; next up M4 (PBR renderer v1).** The Tracy GPU-zone check from M1 is still manual (needs the Tracy GUI). Crates so far: `ge_core`, `ge_platform`, `ge_tasks`, `ge_rhi`, `ge_shader`, `ge_ecs`, `ge_asset`, `ge_render`, `ge_engine`, `ge_editor`, `games/sample`, `apps/game`, `apps/editor` and `xtask` (plans: `docs/plans/0001`–`0005`).
 
 **Known machine quirk:** this hybrid laptop's panel (1920 wide, 144 Hz) is driven by the Radeon, so frames rendered on the RTX 3050 are copied across adapters. On the **"Silent"** power plan the dGPU capped at about 45 fps even for a clear-only frame. On **"Turbo"** it runs at the full 144 Hz (6.94 ms) on both Vulkan and D3D12. Always benchmark on Turbo. Windowed Mailbox is still capped at the refresh rate by the cross-adapter copy, so measure GPU cost with GPU timestamps (M1), not fps.
 
@@ -270,10 +271,10 @@ These come from lore Appendix C. Work proceeds on the default. Confirm each with
 | Engine name / crate prefix | `ge_` placeholder | before M0 publishes crate names |
 | Vertical-slice game | **Settled 2026-10-19:** small third-person arena (`games/sample`) | ~~M2~~ done |
 | GPU backend | wgpu only; native D3D12/Vulkan considered after M12 | M12 |
-| Platforms | Windows first; keep WASM/WebGPU compiling where it's cheap | M3 |
+| Platforms | **Settled 2026-11-04:** Windows only; WASM/WebGPU not kept compiling (revisit for a web demo) | ~~M3~~ done |
 | Scripting | Rust hot patch only; Lua (`mlua`) vs WASM (`wasmtime`) decided at M11 | M11 |
 | Shipping panic strategy | `abort` | M10 |
-| Container / GUID scheme | UUID v4 GUIDs in `.meta`; TOC + CAS | M3 / M10 |
+| Container / GUID scheme | **GUIDs settled 2026-11-04:** UUID v4 in `.meta` (plan 0005). Containers: TOC + CAS | ~~M3~~ / M10 |
 | License | MIT OR Apache-2.0 | before first public push |
 
 ---

@@ -18,7 +18,10 @@ use ge_shader::{ShaderError, ShaderLibrary};
 use glam::{Mat4, Vec3, Vec4};
 use tracing::{error, info, info_span, warn};
 
+use ge_asset::{AssetId, MaterialAsset, Mesh as AssetMesh};
+
 use crate::Camera;
+use crate::assets::{AssetUpload, GpuAssets};
 use crate::camera::aspect_ratio;
 use crate::lighting::{ColorManagement, LightItem, LightUniform, MAX_LIGHTS, ViewportShading};
 use crate::mesh::{GpuMesh, MeshData, Vertex};
@@ -82,6 +85,8 @@ pub enum MeshKind {
     Plane,
     /// An editor primitive, generated and cached on first use.
     Primitive(PrimitiveMesh),
+    /// A mesh asset (glTF primitive), uploaded when the asset loads.
+    Asset(AssetId<AssetMesh>),
 }
 
 impl MeshKind {
@@ -91,6 +96,8 @@ impl MeshKind {
             MeshKind::Cube => Vec3::splat(0.5),
             MeshKind::Plane => Vec3::new(1.0, 0.0, 1.0),
             MeshKind::Primitive(p) => p.shape.half_extents(),
+            // Asset bounds live in the asset; callers that need them ask the AssetServer.
+            MeshKind::Asset(_) => Vec3::splat(0.5),
         }
     }
 }
@@ -107,6 +114,9 @@ pub struct DrawItem {
     pub emission: Vec3,
     /// Draw back faces too (Blender's "Backface Culling" off).
     pub double_sided: bool,
+    /// Textures come from this material asset (factors are already folded into the fields
+    /// above by extract). `None` = white textures.
+    pub material_asset: Option<AssetId<MaterialAsset>>,
 }
 
 impl DrawItem {
@@ -120,6 +130,7 @@ impl DrawItem {
             roughness: 0.5,
             emission: Vec3::ZERO,
             double_sided: false,
+            material_asset: None,
         }
     }
 }
@@ -154,6 +165,8 @@ pub struct FrameInputs<'a> {
     pub direct_light: f32,
     pub overlays: Overlays,
     pub ui: Option<&'a mut UiDrawList>,
+    /// Asset changes to apply before drawing (drained).
+    pub asset_uploads: Option<&'a mut Vec<AssetUpload>>,
 }
 
 impl<'a> FrameInputs<'a> {
@@ -168,6 +181,7 @@ impl<'a> FrameInputs<'a> {
             direct_light: 1.0,
             overlays: Overlays::default(),
             ui: None,
+            asset_uploads: None,
         }
     }
 }
@@ -213,6 +227,7 @@ pub struct Renderer {
     cube: GpuMesh,
     plane: GpuMesh,
     primitives: HashMap<PrimitiveMesh, CachedPrimitive>,
+    assets: GpuAssets,
     ui: UiRenderer,
     frame_index: u64,
     warned_overflow: bool,
@@ -312,6 +327,7 @@ impl Renderer {
         );
 
         let ui = UiRenderer::new(rhi, color_format, &shaders);
+        let assets = GpuAssets::new(rhi);
         let mut renderer = Self {
             shaders,
             color_format,
@@ -331,6 +347,7 @@ impl Renderer {
             cube: GpuMesh::upload(rhi, "Cube", &MeshData::cube(0.5, [1.0; 3])),
             plane: GpuMesh::upload(rhi, "Plane", &MeshData::plane(1.0, [1.0; 3])),
             primitives: HashMap::new(),
+            assets,
             ui,
             frame_index: 0,
             warned_overflow: false,
@@ -357,6 +374,11 @@ impl Renderer {
             missing.push("ui");
         }
         missing
+    }
+
+    /// GPU copies held: `(meshes, textures, materials)`.
+    pub fn gpu_asset_counts(&self) -> (usize, usize, usize) {
+        self.assets.counts()
     }
 
     pub fn shaders_mut(&mut self) -> &mut ShaderLibrary {
@@ -412,7 +434,7 @@ impl Renderer {
                 vertex_entry: "vs_main",
                 fragment_entry: "fs_main",
                 vertex_layouts: &[Vertex::LAYOUT],
-                bind_group_layouts: &[&self.view_layout, &self.object_layout],
+                bind_group_layouts: &[&self.view_layout, &self.object_layout, &self.assets.layout],
                 color_formats: &[self.color_format],
                 depth: Some(DepthState {
                     format: DEPTH_FORMAT,
@@ -473,6 +495,9 @@ impl Renderer {
     pub fn render_frame(&mut self, rhi: &Rhi, frame: &mut Frame, inputs: FrameInputs<'_>) {
         let _span = info_span!("Render::Scene", items = inputs.items.len()).entered();
         self.frame_index += 1;
+        if let Some(uploads) = inputs.asset_uploads {
+            self.assets.apply(rhi, uploads);
+        }
         let size = frame.size();
         let view = inputs.view;
 
@@ -539,6 +564,7 @@ impl Renderer {
             if let Some(pipelines) = &self.pipelines {
                 pass.set_bind_group(0, &self.view_group, &[]);
                 let mut current_double: Option<bool> = None;
+                let mut current_material: Option<Option<AssetId<MaterialAsset>>> = None;
                 for (i, item) in items.iter().enumerate() {
                     let mesh = match &item.mesh {
                         MeshKind::Cube => &self.cube,
@@ -547,7 +573,20 @@ impl Renderer {
                             Some(c) => &c.mesh,
                             None => continue,
                         },
+                        // Not uploaded yet (still loading): skip this frame.
+                        MeshKind::Asset(id) => match self.assets.mesh(*id) {
+                            Some(m) => m,
+                            None => continue,
+                        },
                     };
+                    if current_material != Some(item.material_asset) {
+                        pass.set_bind_group(
+                            2,
+                            self.assets.material_group(item.material_asset),
+                            &[],
+                        );
+                        current_material = Some(item.material_asset);
+                    }
                     if current_double != Some(item.double_sided) {
                         pass.set_pipeline(if item.double_sided {
                             &pipelines.double_sided

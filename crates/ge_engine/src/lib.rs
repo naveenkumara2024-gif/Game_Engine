@@ -22,7 +22,7 @@ pub use app::{App, EXIT_WINDOW_CLOSED, EngineStats, ExitRequest, P_FIXED_HZ, Win
 pub use ge_platform::{Modifiers, MouseButton, PlatformEvent, WindowDesc};
 pub use pacing::T_MAX_FPS;
 pub use plugin::{Plugin, PluginError, Plugins};
-pub use plugins::{DefaultPlugins, InputPlugin, RenderPlugin, TransformPlugin};
+pub use plugins::{AssetPlugin, DefaultPlugins, InputPlugin, RenderPlugin, TransformPlugin};
 pub use schedule::{SimulationState, TickGroup};
 
 ge_core::declare_cvar!(pub static R_CLEAR_COLOR: [f32; 3] =
@@ -45,9 +45,10 @@ pub mod prelude {
         App, DefaultPlugins, EngineStats, ExitRequest, MouseButton, Plugin, Plugins,
         SimulationState, TickGroup, WindowDesc, WindowInfo,
     };
+    pub use ge_asset::{AssetServer, Handle, ModelAsset};
     pub use ge_render::{
         Camera3d, Light, LightKind, Material, MeshKind, MeshRenderer, Primitive, PrimitiveMesh,
-        Visibility, WorldSettings,
+        SceneRoot, Visibility, WorldSettings,
     };
 }
 

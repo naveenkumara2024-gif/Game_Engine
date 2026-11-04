@@ -80,4 +80,6 @@ pub enum RhiError {
     Pipeline { label: String, message: String },
     #[error("GPU readback failed: {0}")]
     Readback(String),
+    #[error("texture upload rejected: {0}")]
+    Upload(String),
 }

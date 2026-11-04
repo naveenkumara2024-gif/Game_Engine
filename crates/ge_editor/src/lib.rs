@@ -220,7 +220,7 @@ fn frame(root: &mut egui::Ui, world: &mut World, ed: &mut Editor, ops: &mut Vec<
                     });
                 });
         }
-        chrome::add_menu_popup(&ctx, ed, ops);
+        chrome::add_menu_popup(&ctx, world, ed, ops);
         chrome::search(&ctx, world, ed, ops);
         chrome::windows(&ctx, world, ed, ops);
     } else {

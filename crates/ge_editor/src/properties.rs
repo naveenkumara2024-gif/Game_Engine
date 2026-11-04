@@ -238,6 +238,20 @@ fn object_tab(ui: &mut egui::Ui, world: &mut World, ed: &mut Editor) {
     let Some(e) = ed.selected else { return };
     name_header(ui, world, ed, e);
 
+    if world.get::<ge_render::SceneRoot>(e).is_some() {
+        section(ui, "object.model", "Model Instance", true, |ui| {
+            model_source_rows(ui, world, e);
+            ui.label(
+                egui::RichText::new(
+                    "Its parts are children (expand it in the Outliner). Re-importing replaces \
+                     them, so edit the instance's transform here, not the parts.",
+                )
+                .small()
+                .color(theme::TEXT_MUTED),
+            );
+        });
+    }
+
     section(ui, "object.transform", "Transform", true, |ui| {
         edit_component::<Transform, _>(ui, world, ed, e, "Move", |ui, t| {
             vec3_row(ui, "Location", &mut t.translation, 0.02, " m")
@@ -431,14 +445,8 @@ fn mesh_tab(ui: &mut egui::Ui, world: &mut World, ed: &mut Editor, e: Entity) {
                 .color(theme::TEXT_MUTED),
             );
         }
+        MeshKind::Asset(id) => asset_mesh_info(ui, world, e, id),
     }
-    planned_row(
-        ui,
-        "Import glTF",
-        "Assets…",
-        "Load meshes from .gltf/.glb files with materials and textures.",
-        Status::Planned("M3", "the asset system"),
-    );
 }
 
 fn primitive_settings(ui: &mut egui::Ui, pm: &mut PrimitiveMesh) -> egui::Response {
@@ -859,15 +867,108 @@ fn material_tab(ui: &mut egui::Ui, world: &mut World, ed: &mut Editor) {
     let Some(e) = ed.selected else { return };
     heading(ui, icon::CIRCLE_HALF, "Material");
     shading_hint(ui);
+    let asset_material = world
+        .get::<MeshRenderer>(e)
+        .and_then(|m| m.material)
+        .and_then(|id| {
+            world
+                .get_resource::<ge_asset::AssetServer>()
+                .and_then(|s| s.get(id))
+                .cloned()
+        });
+    if let Some(asset) = &asset_material {
+        section(ui, "material.asset", "From the model file", true, |ui| {
+            row(ui, "Name", |ui| ui.label(asset.name.as_str()));
+            let [r, g, b, _] = asset.base_color;
+            row(ui, "Base Color", |ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(40.0, 16.0), egui::Sense::hover());
+                ui.painter().rect_filled(
+                    rect,
+                    egui::CornerRadius::same(3),
+                    egui::Color32::from(egui::Rgba::from_rgb(r, g, b)),
+                );
+                ui.label(if asset.base_color_texture.is_some() {
+                    "× texture"
+                } else {
+                    ""
+                })
+            });
+            row(ui, "Metallic", |ui| {
+                ui.label(format!("{:.2}", asset.metallic))
+            });
+            row(ui, "Roughness", |ui| {
+                ui.label(format!("{:.2}", asset.roughness))
+            });
+            let textures = [
+                ("Base color", asset.base_color_texture.is_some()),
+                ("Metal/rough", asset.metallic_roughness_texture.is_some()),
+                ("Emission", asset.emissive_texture.is_some()),
+            ];
+            row(ui, "Textures", |ui| {
+                let used: Vec<&str> = textures
+                    .iter()
+                    .filter(|(_, on)| *on)
+                    .map(|(n, _)| *n)
+                    .collect();
+                ui.label(if used.is_empty() {
+                    "none".into()
+                } else {
+                    used.join(", ")
+                })
+            });
+            planned_row(
+                ui,
+                "Normal / Occlusion",
+                if asset.normal_texture.is_some() || asset.occlusion_texture.is_some() {
+                    "in file"
+                } else {
+                    "—"
+                },
+                "Normal maps add small surface detail to lighting; occlusion darkens crevices. \
+                 They are imported and stored now, and rendered with full PBR.",
+                Status::Planned("M4", "full PBR"),
+            );
+        });
+    }
     if world.get::<Material>(e).is_none() {
-        ui.label(
-            egui::RichText::new("This object has no material: it uses its game color.")
-                .color(theme::TEXT_MUTED),
-        );
-        if ui
-            .button(format!("{} New Material", icon::PLUS))
-            .on_hover_text("Adds a Principled BSDF starting from the object's current color")
-            .clicked()
+        let override_text = if asset_material.is_some() {
+            "Edits to the file's material come from re-exporting it. Override to tweak it here \
+             (the file's textures stay applied)."
+        } else {
+            "This object has no material: it uses its game color."
+        };
+        ui.label(egui::RichText::new(override_text).color(theme::TEXT_MUTED));
+        if let Some(asset) = &asset_material
+            && ui
+                .button(format!("{} Override Material", icon::PENCIL_SIMPLE))
+                .on_hover_text("Copy the file's values into an editable material on this object")
+                .clicked()
+        {
+            let [r, g, b, _] = asset.base_color;
+            ed.history.execute(
+                world,
+                Box::new(AddComponent {
+                    entity: e,
+                    value: Material {
+                        base_color: Vec3::new(r, g, b),
+                        metallic: asset.metallic,
+                        roughness: asset.roughness,
+                        emission_color: Vec3::from(asset.emissive),
+                        emission_strength: if asset.emissive == [0.0; 3] { 0.0 } else { 1.0 },
+                        backface_culling: !asset.double_sided,
+                    },
+                    label: "Override Material",
+                }),
+                None,
+            );
+            return;
+        }
+        if asset_material.is_none()
+            && ui
+                .button(format!("{} New Material", icon::PLUS))
+                .on_hover_text("Adds a Principled BSDF starting from the object's current color")
+                .clicked()
         {
             let tint = world
                 .get::<MeshRenderer>(e)
@@ -976,4 +1077,89 @@ fn material_tab(ui: &mut egui::Ui, world: &mut World, ed: &mut Editor) {
         });
     });
     schema_panels(ui, world, ed, settings::MATERIAL_PANELS, None);
+}
+
+/// The model instance root (or the instance this entity belongs to), if any.
+fn scene_root_of(world: &World, mut e: Entity) -> Option<Entity> {
+    loop {
+        if world.get::<ge_render::SceneRoot>(e).is_some() {
+            return Some(e);
+        }
+        e = world.get::<ChildOf>(e)?.parent();
+    }
+}
+
+/// Source file, GUID and load state of the model `e` belongs to.
+fn model_source_rows(ui: &mut egui::Ui, world: &World, e: Entity) {
+    let Some(root) = scene_root_of(world, e) else {
+        return;
+    };
+    let (Some(scene), Some(server)) = (
+        world.get::<ge_render::SceneRoot>(root),
+        world.get_resource::<ge_asset::AssetServer>(),
+    ) else {
+        return;
+    };
+    row(ui, "Source", |ui| {
+        ui.label(scene.0.source().to_string())
+            .on_hover_text("The file under assets/. Re-export it and the model updates live.")
+    });
+    if let Some(guid) = server.guid_of(&scene.0) {
+        row(ui, "GUID", |ui| {
+            ui.label(
+                egui::RichText::new(guid.to_string())
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            )
+            .on_hover_text(
+                "Stored in the .meta file next to the source. Moving or renaming the file \
+                     together with its .meta keeps this id, so references survive.",
+            )
+        });
+    }
+    let state = server.state(scene.0.id());
+    row(ui, "State", |ui| match state {
+        ge_asset::LoadState::Loaded => {
+            ui.label(format!("Loaded (version {})", server.version(scene.0.id())))
+        }
+        ge_asset::LoadState::Loading => ui.label("Loading…"),
+        ge_asset::LoadState::Failed(err) => {
+            ui.label(egui::RichText::new(format!("Failed: {err}")).color(theme::AXIS_X))
+        }
+        ge_asset::LoadState::NotLoaded => ui.label("Not loaded"),
+    });
+}
+
+fn asset_mesh_info(
+    ui: &mut egui::Ui,
+    world: &World,
+    e: Entity,
+    id: ge_asset::AssetId<ge_asset::Mesh>,
+) {
+    section(ui, "mesh.asset", "Imported Mesh", true, |ui| {
+        model_source_rows(ui, world, e);
+        if let Some(mesh) = world
+            .get_resource::<ge_asset::AssetServer>()
+            .and_then(|s| s.get(id))
+        {
+            row(ui, "Vertices", |ui| {
+                ui.label(mesh.vertex_count().to_string())
+            });
+            row(ui, "Triangles", |ui| {
+                ui.label(mesh.triangle_count().to_string())
+            });
+            let size = glam::Vec3::from(mesh.bounds_max) - glam::Vec3::from(mesh.bounds_min);
+            row(ui, "Size", |ui| {
+                ui.label(format!("{:.2} × {:.2} × {:.2} m", size.x, size.y, size.z))
+            });
+        }
+        planned_row(
+            ui,
+            "Import Settings",
+            "Edit .meta",
+            "Scale, UV flip and mip generation live in the .meta file next to the source; \
+             editing them here comes with the asset browser.",
+            Status::Planned("M6", "the asset browser"),
+        );
+    });
 }

@@ -1,0 +1,12 @@
+(
+    version: 1,
+    guid: "4979aa8b-e45b-4b25-828f-5e70fde3d716",
+    importer: "gltf",
+    importer_version: 1,
+    settings: (
+        scale: 1.0,
+        flip_uvs: false,
+        generate_mips: true,
+        srgb: None,
+    ),
+)

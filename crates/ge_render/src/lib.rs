@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod assets;
 mod camera;
 mod components;
 pub mod demo;
@@ -16,6 +17,7 @@ pub mod lighting;
 mod mesh;
 pub mod primitives;
 mod renderer;
+pub mod scene;
 pub mod settings;
 pub mod ui;
 
@@ -31,3 +33,4 @@ pub use renderer::{
     DrawItem, FrameInputs, MAX_OBJECTS, MeshKind, Overlays, R_DEBUG_NORMALS, RenderError,
     RenderView, Renderer,
 };
+pub use scene::{SceneNode, SceneRoot, SceneSpawned, spawn_scenes};

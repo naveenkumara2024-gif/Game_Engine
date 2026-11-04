@@ -94,6 +94,7 @@ impl<'a> Engine<'a> {
                     direct_light: snapshot.direct_light,
                     overlays: snapshot.overlays,
                     ui: Some(&mut snapshot.ui),
+                    asset_uploads: Some(&mut snapshot.asset_uploads),
                 };
                 renderer.render_frame(rhi, &mut frame, inputs);
                 rhi.end_frame(swapchain, frame);

@@ -308,12 +308,15 @@ pub fn pick(world: &mut World, view: &ViewInfo, pos: egui::Pos2) -> Option<Entit
         &MeshRenderer,
         Option<&ge_render::Visibility>,
     ), Without<EditorOnly>>();
-    for (e, global, mesh, vis) in meshes.iter(world) {
+    let world_ref: &World = world;
+    for (e, global, mesh, vis) in meshes.iter(world_ref) {
         if vis.is_some_and(|v| !v.visible) {
             continue;
         }
-        if let Some(t) = ray_obb(origin, dir, global.to_mat4(), mesh_half_extents(&mesh.mesh)) {
-            consider(t, e);
+        let (center, half) = mesh_bounds(world_ref, &mesh.mesh);
+        let m = global.to_mat4() * Mat4::from_translation(center);
+        if let Some(t) = ray_obb(origin, dir, m, half) {
+            consider(t, select_target(world_ref, e));
         }
     }
 
@@ -333,8 +336,31 @@ pub fn pick(world: &mut World, view: &ViewInfo, pos: egui::Pos2) -> Option<Entit
     best.map(|(_, e)| e)
 }
 
-pub fn mesh_half_extents(mesh: &MeshKind) -> Vec3 {
-    mesh.half_extents()
+/// Local bounding box `(center, half extents)` of a mesh; asset meshes use their imported
+/// bounds (a unit box until they finish loading).
+pub fn mesh_bounds(world: &World, mesh: &MeshKind) -> (Vec3, Vec3) {
+    if let MeshKind::Asset(id) = mesh
+        && let Some(m) = world
+            .get_resource::<ge_asset::AssetServer>()
+            .and_then(|s| s.get(*id))
+    {
+        let min = Vec3::from(m.bounds_min);
+        let max = Vec3::from(m.bounds_max);
+        return ((min + max) * 0.5, (max - min) * 0.5);
+    }
+    (Vec3::ZERO, mesh.half_extents())
+}
+
+/// Clicking a mesh inside a model instance selects the instance's root, the way Blender
+/// selects a collection instance (expand the root in the outliner to reach its parts).
+fn select_target(world: &World, mut e: Entity) -> Entity {
+    while world.get::<ge_render::SceneNode>(e).is_some() {
+        match world.get::<ChildOf>(e) {
+            Some(parent) => e = parent.parent(),
+            None => break,
+        }
+    }
+    e
 }
 
 /// A Blender-style unique name: `Cube`, `Cube.001`, `Cube.002` …

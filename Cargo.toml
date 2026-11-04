@@ -18,6 +18,8 @@ ge_shader = { path = "crates/ge_shader", default-features = false }
 ge_render = { path = "crates/ge_render", default-features = false }
 ge_engine = { path = "crates/ge_engine" }
 ge_ecs = { path = "crates/ge_ecs" }
+ge_tasks = { path = "crates/ge_tasks" }
+ge_asset = { path = "crates/ge_asset" }
 ge_editor = { path = "crates/ge_editor" }
 sample = { path = "games/sample" }
 
@@ -32,7 +34,7 @@ wesl = "0.6.0"
 bevy_ecs = { version = "0.20.0", default-features = false, features = ["std"] }
 notify = "8.2.0"
 tracy-client = "0.19.0"
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tracing-tracy = "0.12.0"
@@ -42,6 +44,16 @@ anyhow = "1.0.104"
 mimalloc = "0.1.52"
 pollster = "1.0.1"
 cargo_metadata = "0.23.1"
+# Tasks + assets (plan 0005)
+rayon = "1.12.0"
+crossbeam-channel = "0.5.17"
+gltf = { version = "1.4.1", default-features = false, features = ["utils", "names", "KHR_materials_emissive_strength"] }
+ktx2 = "0.5.0"
+blake3 = "1.8.7"
+serde = { version = "1.0.229", features = ["derive"] }
+ron = "0.12.3"
+postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+uuid = { version = "1.29.0", features = ["v4", "serde"] }
 # Editor UI (plan 0004) — only ge_editor may use these (xtask facade rule).
 # egui 0.36 is the newest version transform-gizmo-egui 0.11 and egui-phosphor 0.14 support.
 egui = { version = "0.36.2", default-features = false, features = ["default_fonts"] }

@@ -23,10 +23,18 @@ struct Object {
 
 @group(1) @binding(0) var<uniform> object: Object;
 
+// Material textures (white 1x1 when the object has no material asset, so factors pass through).
+@group(2) @binding(0) var base_color_texture: texture_2d<f32>;
+// glTF packing: G = roughness, B = metallic.
+@group(2) @binding(1) var metallic_roughness_texture: texture_2d<f32>;
+@group(2) @binding(2) var emissive_texture: texture_2d<f32>;
+@group(2) @binding(3) var material_sampler: sampler;
+
 struct VertexIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
+    @location(3) uv: vec2<f32>,
 }
 
 struct VertexOut {
@@ -34,6 +42,7 @@ struct VertexOut {
     @location(0) world_normal: vec3<f32>,
     @location(1) color: vec3<f32>,
     @location(2) world_position: vec3<f32>,
+    @location(3) uv: vec2<f32>,
 }
 
 @vertex
@@ -44,6 +53,7 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.world_normal = (object.normal_from_local * vec4(in.normal, 0.0)).xyz;
     out.color = in.color * object.tint.rgb;
     out.world_position = world.xyz;
+    out.uv = in.uv;
     return out;
 }
 
@@ -62,9 +72,11 @@ fn shade_scene(in: VertexOut, n: vec3<f32>) -> vec3<f32> {
     s.position = in.world_position;
     s.normal = n;
     s.view_dir = normalize(view.position_time.xyz - in.world_position);
-    s.albedo = in.color;
-    s.metallic = clamp(object.material.x, 0.0, 1.0);
-    s.roughness = clamp(object.material.y, 0.0, 1.0);
+    s.albedo = albedo(in);
+    let mr = textureSample(metallic_roughness_texture, material_sampler, in.uv);
+    s.metallic = clamp(object.material.x * mr.b, 0.0, 1.0);
+    s.roughness = clamp(object.material.y * mr.g, 0.0, 1.0);
+    let emissive = textureSample(emissive_texture, material_sampler, in.uv).rgb;
 
     var direct = vec3(0.0);
     let count = min(u32(view.ambient.w + 0.5), 16u);
@@ -72,7 +84,12 @@ fn shade_scene(in: VertexOut, n: vec3<f32>) -> vec3<f32> {
         direct += shade_light(lights.items[i], s);
     }
     return direct * view.white_balance.w + shade_ambient(view.ambient.rgb, s)
-        + object.emission.rgb;
+        + object.emission.rgb * emissive;
+}
+
+// Vertex color × tint × base color texture (sRGB texture → sampled as linear).
+fn albedo(in: VertexOut) -> vec3<f32> {
+    return in.color * textureSample(base_color_texture, material_sampler, in.uv).rgb;
 }
 
 @if(debug_normals)
@@ -85,7 +102,7 @@ fn shade(in: VertexOut, n: vec3<f32>) -> vec3<f32> {
     if view.color_management.w > 0.5 {
         return color_manage(view, shade_scene(in, n));
     }
-    return color_manage(view, shade_studio(n, in.color));
+    return color_manage(view, shade_studio(n, albedo(in)));
 }
 
 @fragment

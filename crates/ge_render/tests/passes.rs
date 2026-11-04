@@ -260,3 +260,80 @@ fn grid_overlay_draws_on_the_ground_plane() {
         "but not the whole floor ({lit})"
     );
 }
+
+#[test]
+fn material_asset_textures_are_sampled() {
+    use ge_asset::{AssetId, MaterialAsset, PixelFormat, SubRef, Texture};
+    use ge_render::assets::AssetUpload;
+    use std::sync::Arc;
+
+    let Some(mut gpu) = gpu() else { return };
+    // 64×1 texture: left half red, right half green (sRGB), one level. Wide enough that
+    // bilinear filtering only blends right at the middle.
+    let tex_id = AssetId::<Texture>::from_raw(0, 0);
+    let row: Vec<u8> = (0..64)
+        .flat_map(|x| {
+            if x < 32 {
+                [255, 0, 0, 255]
+            } else {
+                [0, 255, 0, 255]
+            }
+        })
+        .collect();
+    let texture = Texture {
+        format: PixelFormat::Rgba8Srgb,
+        width: 64,
+        height: 1,
+        mips: vec![row],
+    };
+    let mat_id = AssetId::<MaterialAsset>::from_raw(0, 0);
+    let mut material = MaterialAsset {
+        metallic: 0.0,
+        roughness: 1.0,
+        ..Default::default()
+    };
+    material.base_color_texture = Some(SubRef {
+        label: "Texture0".into(),
+        id: Some(tex_id),
+    });
+    let mut uploads = vec![
+        AssetUpload::Texture(tex_id, Arc::new(texture)),
+        AssetUpload::Material(mat_id, Arc::new(material)),
+    ];
+
+    // A plane facing the camera, filling the view; lit only by a white world.
+    let view = RenderView {
+        camera: Camera {
+            position: Vec3::new(0.0, 3.0, 0.0),
+            target: Vec3::ZERO,
+            up: Vec3::NEG_Z,
+            ..Default::default()
+        },
+        time: 0.0,
+        clear_color: [0.0; 3],
+    };
+    let mut item = DrawItem::new(
+        MeshKind::Plane,
+        Mat4::from_scale(Vec3::splat(4.0)),
+        Vec4::ONE,
+    );
+    item.roughness = 1.0;
+    item.material_asset = Some(mat_id);
+    let items = [item];
+    let mut inputs = FrameInputs::basic(&view, &items);
+    inputs.shading = ViewportShading::Rendered;
+    inputs.ambient = Vec3::ONE;
+    inputs.asset_uploads = Some(&mut uploads);
+    let pixels = draw(&mut gpu, inputs);
+    assert!(uploads.is_empty(), "uploads drained");
+    assert_eq!(gpu.renderer.gpu_asset_counts(), (0, 1, 1));
+    // The plane's U runs along world Z, which is screen-vertical here (camera up = −Z):
+    // U = 0 (red) is at the top of the image, U = 1 (green) at the bottom.
+    let top = pixel(&pixels, SIZE / 2, 8);
+    let bottom = pixel(&pixels, SIZE / 2, SIZE - 8);
+    assert!(top[0] > 150 && top[1] < 60, "top half samples red: {top:?}");
+    assert!(
+        bottom[1] > 150 && bottom[0] < 60,
+        "bottom half samples green: {bottom:?}"
+    );
+}

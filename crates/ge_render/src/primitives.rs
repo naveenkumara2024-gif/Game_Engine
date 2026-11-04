@@ -327,11 +327,12 @@ impl Hash for PrimitiveMesh {
 
 const WHITE: [f32; 3] = [1.0; 3];
 
-fn vertex(p: Vec3, n: Vec3) -> Vertex {
+fn vertex(p: Vec3, n: Vec3, uv: [f32; 2]) -> Vertex {
     Vertex {
         position: p.to_array(),
         normal: n.normalize_or_zero().to_array(),
         color: WHITE,
+        uv,
     }
 }
 
@@ -344,11 +345,14 @@ fn disc(segments: u32, radius: f32, y: f32, normal: Vec3) -> MeshData {
 
 fn append_disc(mesh: &mut MeshData, segments: u32, radius: f32, y: f32, normal: Vec3) {
     let base = mesh.vertices.len() as u32;
-    mesh.vertices.push(vertex(Vec3::new(0.0, y, 0.0), normal));
+    mesh.vertices
+        .push(vertex(Vec3::new(0.0, y, 0.0), normal, [0.5, 0.5]));
     for i in 0..segments {
         let a = TAU * i as f32 / segments as f32;
         let p = Vec3::new(a.cos() * radius, y, -a.sin() * radius);
-        mesh.vertices.push(vertex(p, normal));
+        // Planar mapping seen from above.
+        let uv = [0.5 + a.cos() * 0.5, 0.5 + a.sin() * 0.5];
+        mesh.vertices.push(vertex(p, normal, uv));
     }
     for i in 0..segments {
         let a = base + 1 + i;
@@ -375,7 +379,8 @@ fn uv_sphere(segments: u32, rings: u32, radius: f32) -> MeshData {
                 theta.cos(),
                 -theta.sin() * phi.sin(),
             );
-            mesh.vertices.push(vertex(n * radius, n));
+            let uv = [s as f32 / segments as f32, r as f32 / rings as f32];
+            mesh.vertices.push(vertex(n * radius, n, uv));
         }
     }
     let row = segments + 1;
@@ -456,7 +461,17 @@ fn ico_sphere(subdivisions: u32, radius: f32) -> MeshData {
         faces = next;
     }
     MeshData {
-        vertices: points.iter().map(|&n| vertex(n * radius, n)).collect(),
+        vertices: points
+            .iter()
+            .map(|&n| {
+                // Spherical mapping (one seam; ico spheres have no natural UV layout).
+                let uv = [
+                    0.5 + n.z.atan2(n.x) / TAU,
+                    0.5 - n.y.clamp(-1.0, 1.0).asin() / PI,
+                ];
+                vertex(n * radius, n, uv)
+            })
+            .collect(),
         indices: faces.into_iter().flatten().collect(),
     }
 }
@@ -472,8 +487,11 @@ fn frustum(segments: u32, r1: f32, r2: f32, depth: f32) -> MeshData {
         let a = TAU * i as f32 / segments as f32;
         let dir = Vec3::new(a.cos(), 0.0, -a.sin());
         let n = dir + Vec3::Y * slope;
-        mesh.vertices.push(vertex(dir * r1 + Vec3::Y * y0, n));
-        mesh.vertices.push(vertex(dir * r2 + Vec3::Y * y1, n));
+        let u = i as f32 / segments as f32;
+        mesh.vertices
+            .push(vertex(dir * r1 + Vec3::Y * y0, n, [u, 1.0]));
+        mesh.vertices
+            .push(vertex(dir * r2 + Vec3::Y * y1, n, [u, 0.0]));
     }
     for i in 0..segments {
         let b0 = base + i * 2; // bottom, this column
@@ -504,8 +522,11 @@ fn torus(major: u32, minor: u32, major_radius: f32, minor_radius: f32) -> MeshDa
         for j in 0..=minor {
             let v = TAU * j as f32 / minor as f32;
             let n = ring * v.cos() + Vec3::Y * v.sin();
-            mesh.vertices
-                .push(vertex(ring * major_radius + n * minor_radius, n));
+            mesh.vertices.push(vertex(
+                ring * major_radius + n * minor_radius,
+                n,
+                [i as f32 / major as f32, j as f32 / minor as f32],
+            ));
         }
     }
     let row = minor + 1;

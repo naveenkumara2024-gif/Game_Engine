@@ -269,11 +269,28 @@ pub fn overlays(painter: &egui::Painter, world: &mut World, ed: &Editor, view: &
         Option<&ViewportDisplay>,
         Option<&Visibility>,
     ), Without<EditorOnly>>();
-    for (e, global, mesh, display, vis) in meshes.iter(world) {
+    // A selected model instance outlines every part of it.
+    let selected_scene = selected.filter(|e| world.get::<ge_render::SceneRoot>(*e).is_some());
+    let world_ref: &World = world;
+    let in_selected_scene = |mut e: Entity| {
+        let Some(root) = selected_scene else {
+            return false;
+        };
+        loop {
+            if e == root {
+                return true;
+            }
+            match world_ref.get::<ChildOf>(e) {
+                Some(p) => e = p.parent(),
+                None => return false,
+            }
+        }
+    };
+    for (e, global, mesh, display, vis) in meshes.iter(world_ref) {
         if vis.is_some_and(|v| !v.visible) {
             continue;
         }
-        let is_selected = selected == Some(e);
+        let is_selected = selected == Some(e) || in_selected_scene(e);
         let show =
             (is_selected && toggles.selection_bounds) || display.is_some_and(|d| d.show_bounds);
         if show {
@@ -282,11 +299,12 @@ pub fn overlays(painter: &egui::Painter, world: &mut World, ed: &Editor, view: &
             } else {
                 theme::TEXT_MUTED
             };
+            let (center, half) = crate::state::mesh_bounds(world_ref, &mesh.mesh);
             draw_box(
                 painter,
                 view,
-                global.to_mat4(),
-                mesh.mesh.half_extents(),
+                global.to_mat4() * Mat4::from_translation(center),
+                half,
                 color,
             );
         }

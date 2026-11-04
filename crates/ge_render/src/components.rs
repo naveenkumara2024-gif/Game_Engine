@@ -5,8 +5,10 @@
 //! [`RenderSnapshot`]. That is the single sync point between game and render state; in M5 the
 //! snapshot moves to the render thread unchanged.
 
+use ge_asset::{AssetEventKind, AssetId, AssetServer, MaterialAsset};
 use ge_ecs::prelude::*;
 
+use crate::assets::AssetUpload;
 use crate::lighting::{
     ColorManagement, Light, LightItem, MAX_LIGHTS, Material, R_DIRECT_LIGHT_INTENSITY,
     R_VIEWPORT_SHADING, ViewportShading, WorldSettings,
@@ -21,6 +23,8 @@ pub struct MeshRenderer {
     pub mesh: MeshKind,
     /// Linear RGB multiplier.
     pub tint: Vec4,
+    /// A material asset (glTF). An inline [`Material`] component on the same entity wins.
+    pub material: Option<AssetId<MaterialAsset>>,
 }
 
 impl MeshRenderer {
@@ -28,6 +32,7 @@ impl MeshRenderer {
         Self {
             mesh,
             tint: Vec3::from(tint).extend(1.0),
+            material: None,
         }
     }
 }
@@ -95,6 +100,8 @@ pub struct RenderSnapshot {
     pub overlays: Overlays,
     /// Texture updates queue up here until a frame is actually rendered (see [`UiDrawList`]).
     pub ui: UiDrawList,
+    /// Asset changes for the GPU; like UI textures, they queue until a frame renders.
+    pub asset_uploads: Vec<AssetUpload>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -105,6 +112,7 @@ pub fn extract_render_snapshot(
     camera_override: Option<Res<CameraOverride>>,
     overlays: Option<Res<ViewportOverlays>>,
     ui: Option<ResMut<UiOutput>>,
+    assets: Option<ResMut<AssetServer>>,
     cameras: Query<(Entity, &GlobalTransform, &Camera3d, Option<&Visibility>)>,
     meshes: Query<(
         &GlobalTransform,
@@ -117,6 +125,28 @@ pub fn extract_render_snapshot(
     let snapshot = &mut *snapshot;
     let visible = |v: Option<&Visibility>| v.is_none_or(|v| v.visible);
     snapshot.time = time.elapsed_secs();
+
+    // Asset changes since the last extract → one-time uploads (law 2: no per-frame copies).
+    let assets = assets.map(|mut server| {
+        for event in server.drain_render_changes() {
+            let upload = match event.kind {
+                AssetEventKind::Removed => Some(AssetUpload::Free(event.id)),
+                AssetEventKind::Loaded | AssetEventKind::Modified => {
+                    if let Some(id) = event.id.typed() {
+                        server.get(id).map(|m| AssetUpload::Mesh(id, m.clone()))
+                    } else if let Some(id) = event.id.typed() {
+                        server.get(id).map(|t| AssetUpload::Texture(id, t.clone()))
+                    } else if let Some(id) = event.id.typed() {
+                        server.get(id).map(|m| AssetUpload::Material(id, m.clone()))
+                    } else {
+                        None
+                    }
+                }
+            };
+            snapshot.asset_uploads.extend(upload);
+        }
+        server
+    });
 
     let forced = camera_override
         .and_then(|o| o.0)
@@ -147,7 +177,22 @@ pub fn extract_render_snapshot(
                 .filter(|(.., v)| visible(*v))
                 .map(|(global, mesh, material, _)| {
                     let mut item = DrawItem::new(mesh.mesh, global.to_mat4(), mesh.tint);
+                    // Material asset first (factors + textures); an inline Material overrides.
+                    if material.is_none()
+                        && let (Some(id), Some(server)) = (mesh.material, assets.as_deref())
+                        && let Some(m) = server.get(id)
+                    {
+                        let [r, g, b, _] = m.base_color;
+                        item.tint = (mesh.tint.truncate() * Vec3::new(r, g, b)).extend(mesh.tint.w);
+                        item.metallic = m.metallic;
+                        item.roughness = m.roughness;
+                        item.emission = Vec3::from(m.emissive);
+                        item.double_sided = m.double_sided;
+                        item.material_asset = Some(id);
+                    }
                     if let Some(m) = material {
+                        // Inline factors win; the asset's textures (if any) still apply.
+                        item.material_asset = mesh.material;
                         item.tint = (mesh.tint.truncate() * m.base_color).extend(mesh.tint.w);
                         item.metallic = m.metallic;
                         item.roughness = m.roughness;
