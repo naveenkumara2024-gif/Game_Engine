@@ -1,0 +1,22 @@
+[package]
+name = "ge_editor"
+description = "In-process editor (plan 0004): floating Blender-style UI over the engine. Only crate that names egui."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ge_core.workspace = true
+ge_ecs.workspace = true
+ge_render.workspace = true
+ge_engine.workspace = true
+egui.workspace = true
+transform-gizmo-egui.workspace = true
+egui-phosphor.workspace = true
+glam.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

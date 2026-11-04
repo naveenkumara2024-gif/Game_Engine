@@ -18,6 +18,7 @@ ge_shader = { path = "crates/ge_shader", default-features = false }
 ge_render = { path = "crates/ge_render", default-features = false }
 ge_engine = { path = "crates/ge_engine" }
 ge_ecs = { path = "crates/ge_ecs" }
+ge_editor = { path = "crates/ge_editor" }
 sample = { path = "games/sample" }
 
 # third party (CLAUDE.md §4)
@@ -41,6 +42,11 @@ anyhow = "1.0.104"
 mimalloc = "0.1.52"
 pollster = "1.0.1"
 cargo_metadata = "0.23.1"
+# Editor UI (plan 0004) — only ge_editor may use these (xtask facade rule).
+# egui 0.36 is the newest version transform-gizmo-egui 0.11 and egui-phosphor 0.14 support.
+egui = { version = "0.36.2", default-features = false, features = ["default_fonts"] }
+transform-gizmo-egui = "0.11.0"
+egui-phosphor = "0.14.0"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

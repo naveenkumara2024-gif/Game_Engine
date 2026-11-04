@@ -18,12 +18,12 @@ mod plugins;
 mod runner;
 mod schedule;
 
-pub use app::{App, ExitRequest, P_FIXED_HZ};
-pub use ge_platform::{MouseButton, WindowDesc};
+pub use app::{App, EXIT_WINDOW_CLOSED, EngineStats, ExitRequest, P_FIXED_HZ, WindowInfo};
+pub use ge_platform::{Modifiers, MouseButton, PlatformEvent, WindowDesc};
 pub use pacing::T_MAX_FPS;
 pub use plugin::{Plugin, PluginError, Plugins};
 pub use plugins::{DefaultPlugins, InputPlugin, RenderPlugin, TransformPlugin};
-pub use schedule::TickGroup;
+pub use schedule::{SimulationState, TickGroup};
 
 ge_core::declare_cvar!(pub static R_CLEAR_COLOR: [f32; 3] =
     ("r.ClearColor", [0.10, 0.20, 0.40], "Background color behind the scene, linear RGB"));
@@ -40,11 +40,15 @@ pub enum EngineError {
 pub mod prelude {
     pub use ge_ecs::prelude::*;
 
-    pub use crate::input::{ActionState, Axis2dBinding, Binding, InputMap};
+    pub use crate::input::{ActionState, Axis2dBinding, Binding, InputMap, PlatformEvents};
     pub use crate::{
-        App, DefaultPlugins, ExitRequest, MouseButton, Plugin, Plugins, TickGroup, WindowDesc,
+        App, DefaultPlugins, EngineStats, ExitRequest, MouseButton, Plugin, Plugins,
+        SimulationState, TickGroup, WindowDesc, WindowInfo,
     };
-    pub use ge_render::{Camera3d, MeshKind, MeshRenderer};
+    pub use ge_render::{
+        Camera3d, Light, LightKind, Material, MeshKind, MeshRenderer, Primitive, PrimitiveMesh,
+        Visibility, WorldSettings,
+    };
 }
 
 #[cfg(test)]

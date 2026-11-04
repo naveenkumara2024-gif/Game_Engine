@@ -67,7 +67,7 @@ Change any of these only through an approved plan.
 | Parallelism | `rayon`, `crossbeam` channels, `parking_lot`; a small async executor for IO only |
 | Physics | `rapier3d` behind the `PhysicsBackend` trait |
 | Audio | `kira` on a dedicated audio thread |
-| Editor UI | `egui` + `egui_dock` + `transform-gizmo-egui`, in-process |
+| Editor UI | `egui` 0.36 + `egui_dock` (M6) + `transform-gizmo-egui` + `egui-phosphor` icons, in-process; only `ge_editor` may name them (`cargo xtask check-layers`, plan 0004) |
 | Game UI | our own retained UI + `taffy` layout + `cosmic-text`/`parley` |
 | Assets in | `gltf`, `image`, `ktx2`, `meshopt`; `notify` for hot reload; `blake3` for the DDC key |
 | Profiling | `tracing` + `tracing-tracy` |
@@ -214,7 +214,7 @@ Windows setup:
 
 ## 9. Roadmap and status
 
-Full exit criteria are in lore §8. **Current status: M2 done (2026-10-19), next up M3.** The Tracy GPU-zone check from M1 is still manual (needs the Tracy GUI). Crates so far: `ge_core`, `ge_platform`, `ge_rhi`, `ge_shader`, `ge_ecs`, `ge_render`, `ge_engine`, `games/sample`, `apps/game` and `xtask` (plans: `docs/plans/0001`–`0003`).
+Full exit criteria are in lore §8. **Current status: M2 done (2026-10-19); editor shell v0 (plan 0004, a slice of M6 plus lighting v0 from M4) done ahead of M3 (2026-11-04); next up M3.** The Tracy GPU-zone check from M1 is still manual (needs the Tracy GUI). Crates so far: `ge_core`, `ge_platform`, `ge_rhi`, `ge_shader`, `ge_ecs`, `ge_render`, `ge_engine`, `ge_editor`, `games/sample`, `apps/game`, `apps/editor` and `xtask` (plans: `docs/plans/0001`–`0004`).
 
 **Known machine quirk:** this hybrid laptop's panel (1920 wide, 144 Hz) is driven by the Radeon, so frames rendered on the RTX 3050 are copied across adapters. On the **"Silent"** power plan the dGPU capped at about 45 fps even for a clear-only frame. On **"Turbo"** it runs at the full 144 Hz (6.94 ms) on both Vulkan and D3D12. Always benchmark on Turbo. Windowed Mailbox is still capped at the refresh rate by the cross-adapter copy, so measure GPU cost with GPU timestamps (M1), not fps.
 

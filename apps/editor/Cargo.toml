@@ -1,0 +1,21 @@
+[package]
+name = "editor"
+description = "Editor binary. Thin: the engine + editor plugin + the sample game, in one process (lore §6.10)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+tracy = ["ge_engine/tracy"]
+
+[dependencies]
+ge_engine.workspace = true
+ge_editor.workspace = true
+sample.workspace = true
+mimalloc.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

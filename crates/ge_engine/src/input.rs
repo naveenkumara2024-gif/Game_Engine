@@ -112,7 +112,7 @@ impl ActionState {
                 PlatformEvent::MouseMotion { dx, dy } => {
                     self.mouse_delta += Vec2::new(*dx as f32, *dy as f32);
                 }
-                PlatformEvent::MouseWheel { lines } => self.wheel += lines,
+                PlatformEvent::MouseWheel { lines, .. } => self.wheel += lines,
                 // Release events are lost while unfocused; drop everything so nothing sticks.
                 PlatformEvent::Focused(false) => {
                     self.keys_held.clear();
@@ -277,7 +277,10 @@ mod tests {
             &[
                 PlatformEvent::MouseMotion { dx: 3.0, dy: -1.0 },
                 PlatformEvent::MouseMotion { dx: 2.0, dy: 0.0 },
-                PlatformEvent::MouseWheel { lines: 1.5 },
+                PlatformEvent::MouseWheel {
+                    lines: 1.5,
+                    horizontal: 0.0,
+                },
             ],
         );
         assert_eq!(s.mouse_delta(), Vec2::new(5.0, -1.0));

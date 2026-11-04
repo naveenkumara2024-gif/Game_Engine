@@ -4,14 +4,16 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ge_ecs::prelude::Vec3;
 use ge_platform::{PlatformApp, PlatformContext, PlatformEvent, Window};
-use ge_render::{RenderSnapshot, RenderView, Renderer};
+use ge_render::lighting::ViewportShading;
+use ge_render::{FrameInputs, RenderSnapshot, RenderView, Renderer};
 use ge_rhi::{Rhi, Swapchain};
 use ge_shader::ShaderLibrary;
 use tracing::{debug, error, info, info_span, warn};
 
 use crate::input::PlatformEvents;
-use crate::{App, R_CLEAR_COLOR, pacing};
+use crate::{App, EXIT_WINDOW_CLOSED, EngineStats, R_CLEAR_COLOR, WindowInfo, pacing};
 
 /// Tick period while the window can't present (≈60 Hz keeps simulation alive cheaply).
 const MINIMIZED_TICK: Duration = Duration::from_millis(16);
@@ -61,18 +63,39 @@ impl<'a> Engine<'a> {
         }
         match rhi.begin_frame(swapchain) {
             Ok(Some(mut frame)) => {
-                let empty = RenderSnapshot::default();
-                let snapshot = self
-                    .app
-                    .world()
-                    .get_resource::<RenderSnapshot>()
-                    .unwrap_or(&empty);
+                let world = self.app.world_mut();
+                if !world.contains_resource::<RenderSnapshot>() {
+                    world.init_resource::<RenderSnapshot>();
+                }
+                let mut snapshot = world.resource_mut::<RenderSnapshot>();
+                let snapshot = &mut *snapshot;
+                // The world color is the background, color-managed like the scene so Exposure
+                // and the view transform affect it too (Blender does the same).
+                let background = snapshot
+                    .world
+                    .map_or_else(|| R_CLEAR_COLOR.get(), |w| w.radiance().to_array());
                 let view = RenderView {
                     camera: snapshot.camera.unwrap_or_default(),
                     time: snapshot.time,
-                    clear_color: R_CLEAR_COLOR.get(),
+                    clear_color: snapshot.color.apply(background),
                 };
-                renderer.render(rhi, &mut frame, &view, &snapshot.items);
+                let rendered = matches!(snapshot.shading, ViewportShading::Rendered);
+                let inputs = FrameInputs {
+                    view: &view,
+                    items: &snapshot.items,
+                    lights: &snapshot.lights,
+                    ambient: if rendered {
+                        snapshot.world.map_or(Vec3::ZERO, |w| w.radiance())
+                    } else {
+                        Vec3::ZERO
+                    },
+                    color: snapshot.color,
+                    shading: snapshot.shading,
+                    direct_light: snapshot.direct_light,
+                    overlays: snapshot.overlays,
+                    ui: Some(&mut snapshot.ui),
+                };
+                renderer.render_frame(rhi, &mut frame, inputs);
                 rhi.end_frame(swapchain, frame);
             }
             Ok(None) => {}
@@ -91,6 +114,13 @@ impl<'a> Engine<'a> {
         // cross-adapter copy (CLAUDE.md §9).
         let timings = self.gpu.as_ref().and_then(|g| g.rhi.gpu_timings());
         let gpu_ms = timings.map_or_else(|| "n/a".to_owned(), |t| format!("{:.2} ms", t.total_ms));
+        {
+            let gpu_total = timings.map(|t| t.total_ms);
+            let mut stats = self.app.world_mut().resource_mut::<EngineStats>();
+            stats.cpu_ms = avg.as_secs_f32() * 1000.0;
+            stats.gpu_ms = gpu_total;
+            stats.fps = 1.0 / avg.as_secs_f32();
+        }
         debug!(
             cpu_ms = avg.as_secs_f64() * 1000.0,
             gpu = ?timings.map(|t| &t.passes),
@@ -115,6 +145,16 @@ impl PlatformApp for Engine<'_> {
             warn!(error = %e, "shader hot reload unavailable");
         }
         let renderer = Renderer::new(&rhi, swapchain.format(), shaders);
+        {
+            let world = self.app.world_mut();
+            *world.resource_mut::<WindowInfo>() = WindowInfo {
+                size: window.size(),
+                scale_factor: window.scale_factor() as f32,
+            };
+            let mut stats = world.resource_mut::<EngineStats>();
+            stats.adapter = rhi.adapter().name.clone();
+            stats.backend = rhi.adapter().backend.clone();
+        }
         self.window = Some(window);
         self.gpu = Some(Gpu {
             rhi,
@@ -128,11 +168,18 @@ impl PlatformApp for Engine<'_> {
 
     fn event(&mut self, event: PlatformEvent) {
         match &event {
-            PlatformEvent::CloseRequested => self.app.request_exit("window closed"),
+            PlatformEvent::CloseRequested => self.app.request_exit(EXIT_WINDOW_CLOSED),
             PlatformEvent::Resized { width, height } => {
                 if let Some(gpu) = &mut self.gpu {
                     gpu.swapchain.resize(&gpu.rhi, *width, *height);
                 }
+                self.app.world_mut().resource_mut::<WindowInfo>().size = (*width, *height);
+            }
+            PlatformEvent::ScaleFactorChanged { scale_factor } => {
+                self.app
+                    .world_mut()
+                    .resource_mut::<WindowInfo>()
+                    .scale_factor = *scale_factor as f32;
             }
             _ => {}
         }

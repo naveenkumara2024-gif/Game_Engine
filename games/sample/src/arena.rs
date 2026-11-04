@@ -16,8 +16,20 @@ pub struct Spin {
 
 pub fn spawn_arena(mut commands: Commands) {
     commands.spawn((
+        Name::new("Floor"),
         Transform::default().with_scale(Vec3::splat(ARENA_HALF_SIZE)),
         MeshRenderer::new(MeshKind::Plane, [0.55, 0.55, 0.58]),
+    ));
+
+    // The sun used in Rendered shading (Solid shading keeps the fixed studio light, so the
+    // game's look is unchanged). Same direction as the studio light.
+    commands.spawn((
+        Name::new("Sun"),
+        Transform::from_xyz(7.0, 20.0, 9.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Light {
+            power: 2.0,
+            ..Light::new(LightKind::Sun)
+        },
     ));
 
     let pillars = 10;
@@ -25,6 +37,7 @@ pub fn spawn_arena(mut commands: Commands) {
         let angle = i as f32 / pillars as f32 * std::f32::consts::TAU;
         let radius = ARENA_HALF_SIZE - 2.0;
         commands.spawn((
+            Name::new(format!("Pillar.{:03}", i + 1)),
             Transform::from_xyz(angle.cos() * radius, 2.0, angle.sin() * radius)
                 .with_scale(Vec3::new(1.2, 4.0, 1.2)),
             MeshRenderer::new(MeshKind::Cube, [0.35, 0.38, 0.45]),
@@ -34,6 +47,7 @@ pub fn spawn_arena(mut commands: Commands) {
     // Floating cluster: one parent that spins, children that spin on their own axes.
     commands
         .spawn((
+            Name::new("Cluster"),
             Transform::from_xyz(-7.0, 2.5, -7.0),
             Spin {
                 axis: Vec3::Y,
@@ -45,6 +59,7 @@ pub fn spawn_arena(mut commands: Commands) {
                 let a = i as f32 / 6.0 * std::f32::consts::TAU;
                 let hue = i as f32 / 6.0;
                 cluster.spawn((
+                    Name::new(format!("Cluster Cube.{:03}", i + 1)),
                     Transform::from_xyz(a.cos() * 2.0, (a * 2.0).sin() * 0.5, a.sin() * 2.0)
                         .with_scale(Vec3::splat(0.6)),
                     MeshRenderer::new(MeshKind::Cube, palette(hue)),

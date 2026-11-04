@@ -133,8 +133,13 @@ mod layers {
     }
 
     /// Third-party crates that only their facade crate may name (CLAUDE.md §4: bevy stays
-    /// behind `ge_ecs`, wgpu behind `ge_rhi`; law 12).
-    const FACADES: &[(&str, &str)] = &[("bevy_", "ge_ecs"), ("wgpu", "ge_rhi")];
+    /// behind `ge_ecs`, wgpu behind `ge_rhi`; law 12; egui behind `ge_editor`, plan 0004).
+    const FACADES: &[(&str, &str)] = &[
+        ("bevy_", "ge_ecs"),
+        ("wgpu", "ge_rhi"),
+        ("egui", "ge_editor"),
+        ("transform-gizmo", "ge_editor"),
+    ];
 
     pub fn check_external(deps: &[(String, String)]) -> Vec<String> {
         deps.iter()
@@ -187,6 +192,18 @@ mod layers {
                 ("ge_render", "glam"),
             ]);
             assert!(check_external(&ok).is_empty());
+            assert!(
+                check_external(&e(&[("ge_editor", "egui"), ("ge_editor", "egui-phosphor")]))
+                    .is_empty()
+            );
+            assert_eq!(
+                check_external(&e(&[
+                    ("ge_render", "egui"),
+                    ("sample", "transform-gizmo-egui")
+                ]))
+                .len(),
+                2
+            );
             let bad = e(&[("sample", "bevy_ecs"), ("ge_render", "wgpu")]);
             assert_eq!(check_external(&bad).len(), 2);
         }

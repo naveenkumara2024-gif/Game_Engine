@@ -27,6 +27,7 @@ pub struct FixedMotion {
 pub fn spawn_player(mut commands: Commands) {
     commands
         .spawn((
+            Name::new("Player"),
             Player {
                 speed: 6.0,
                 facing: 0.0,
@@ -41,15 +42,18 @@ pub fn spawn_player(mut commands: Commands) {
         .with_children(|body| {
             // Shoulders follow the body; the "antenna" on the right one also spins.
             body.spawn((
+                Name::new("Shoulder.L"),
                 Transform::from_xyz(-0.7, 0.3, 0.0).with_scale(Vec3::splat(0.4)),
                 MeshRenderer::new(MeshKind::Cube, [0.9, 0.9, 0.9]),
             ));
             body.spawn((
+                Name::new("Shoulder.R"),
                 Transform::from_xyz(0.7, 0.3, 0.0).with_scale(Vec3::splat(0.4)),
                 MeshRenderer::new(MeshKind::Cube, [0.9, 0.9, 0.9]),
             ))
             .with_children(|shoulder| {
                 shoulder.spawn((
+                    Name::new("Antenna"),
                     Transform::from_xyz(0.0, 1.6, 0.0).with_scale(Vec3::splat(0.6)),
                     MeshRenderer::new(MeshKind::Cube, [0.2, 0.9, 1.0]),
                     Spin {

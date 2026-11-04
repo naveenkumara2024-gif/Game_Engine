@@ -412,6 +412,18 @@ Thread and thread-related names present:
 | Logging stripped in shipping | Cargo features / `cfg` gate debug tooling, logging levels, cheats |
 | Layering proven by CrashReportClient | Lower crates must compile & run without engine/render |
 
+### 2.16 Field notes: Blender 5.2's architecture (for the editor) [SCAN][DOC]
+
+Static only: a raw string scan of the portable `blender-5.2.3-candidate` `blender.exe` (Ghidra/REA timed out on the 113 MB binary) plus its shipped UI scripts (`5.2/scripts/startup/bl_ui/*.py`). Blender is GPL-3.0-or-later; only architecture facts and UI vocabulary are recorded, never code, icons or tooltip text.
+
+- **Data vs. reflection** [SCAN]: `makesdna` (plain structs) and `makesrna` (properties with name, range, unit, description: 81 embedded `makesrna/intern` paths, `RNA_def_property`). The UI, Python, animation and undo all bind to RNA. → Confirms law 4; until `ge_reflect` (M6) the editor uses a schema table (`ge_render::settings`).
+- **Declarative panels** [DOC]: each panel has an id, a label, a parent (sub-panels), an optional header checkbox (`use_*`), `poll()` visibility, and per-engine compatibility. The properties editor only shows the tabs that fit the active object. → Hiding what doesn't apply is the main tool against an overwhelming UI.
+- **Operators + keymaps + undo** [SCAN]: `windowmanager/intern` ×76, `wm_operator`, `editors/undo`, `BKE_undosys`, `ED_undo_push`, `WM_keymap`. Every button, menu entry and shortcut runs an operator. → `ge_editor::Op` + `History`; F3 searches the same list.
+- **Original vs. evaluated data** [SCAN]: `depsgraph/intern`. → The same idea as our extract (law 2).
+- **Draw engines** [SCAN]: `draw/engines` (render engine, workbench, overlay) composited in the viewport. → Grid and selection overlays stay separate from the lighting path.
+- **GPU backends** [SCAN]: `gpu/vulkan` ×67, `gpu/opengl` ×10 behind `gpu/intern`. → Confirms law 12.
+- **EEVEE 5.2 Render tab order** [DOC]: Sampling (Viewport, Render, Shadows, Advanced) → Light Paths (Clamping, Intensity) → Raytracing (Screen Tracing, Denoising, Fast GI) → Volumes → Curves → Simplify → Depth of Field → Motion Blur → Film → Performance (Memory, Viewport, Compositor) → Color Management (Curves, White Balance, Working Space, Advanced). EEVEE Legacy's Bloom, SSR and Soft Shadows are gone.
+
 ### 2.15 Limits of this analysis
 
 - Static only. Nothing here proves runtime behavior (thread timing, frame pacing).

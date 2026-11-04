@@ -33,6 +33,7 @@ impl OrbitCamera {
 
 pub fn spawn_camera(mut commands: Commands) {
     commands.spawn((
+        Name::new("Game Camera"),
         Camera3d::default(),
         OrbitCamera {
             yaw: 0.6,

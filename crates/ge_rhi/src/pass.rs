@@ -71,6 +71,12 @@ impl RenderPass<'_> {
     pub fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
         self.inner.draw(vertices, instances);
     }
+
+    /// Restricts drawing to a rectangle of the target, in pixels from the top-left. The
+    /// caller clamps it to the target (wgpu rejects out-of-bounds rects).
+    pub fn set_scissor_rect(&mut self, x: u32, y: u32, width: u32, height: u32) {
+        self.inner.set_scissor_rect(x, y, width, height);
+    }
 }
 
 impl Drop for RenderPass<'_> {

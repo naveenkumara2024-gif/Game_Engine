@@ -82,7 +82,17 @@ pub enum MouseButton {
 /// Approximate pixels per wheel "line" for devices that report pixel deltas (touchpads).
 const PIXELS_PER_LINE: f64 = 40.0;
 
-/// OS events the engine cares about. Grows with input mapping in M2.
+/// Keyboard modifier state, sent whenever it changes.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    /// Windows key / Cmd.
+    pub logo: bool,
+}
+
+/// OS events the engine cares about.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlatformEvent {
     Resized {
@@ -110,10 +120,22 @@ pub enum PlatformEvent {
         dx: f64,
         dy: f64,
     },
-    /// Wheel movement in lines; positive is away from the user.
+    /// Wheel movement in lines; positive is away from the user. `horizontal` is positive to
+    /// the right (tilt wheels, touchpads).
     MouseWheel {
         lines: f32,
+        horizontal: f32,
     },
+    /// Cursor position inside the window, in physical pixels from the top-left corner (what UI
+    /// hit-testing wants; camera controls use [`PlatformEvent::MouseMotion`]).
+    CursorMoved {
+        x: f32,
+        y: f32,
+    },
+    CursorLeft,
+    /// Committed text from the keyboard (layout- and IME-aware), for text fields.
+    Text(String),
+    Modifiers(Modifiers),
 }
 
 /// Given to [`PlatformApp::init`] to create windows.
@@ -201,7 +223,11 @@ impl ApplicationHandler for Runner<'_> {
         _id: winit::window::WindowId,
         event: WindowEvent,
     ) {
-        if let Some(ev) = translate(&event) {
+        if let WindowEvent::KeyboardInput { event, .. } = &event {
+            for ev in translate_key(event) {
+                self.app.event(ev);
+            }
+        } else if let Some(ev) = translate(&event) {
             self.app.event(ev);
         }
     }
@@ -254,22 +280,50 @@ fn translate(event: &WindowEvent) -> Option<PlatformEvent> {
             },
             pressed: state.is_pressed(),
         },
-        WindowEvent::MouseWheel { delta, .. } => PlatformEvent::MouseWheel {
-            lines: match delta {
-                MouseScrollDelta::LineDelta(_, y) => *y,
-                MouseScrollDelta::PixelDelta(p) => (p.y / PIXELS_PER_LINE) as f32,
-            },
-        },
-        WindowEvent::KeyboardInput { event, .. } => {
-            let winit::keyboard::PhysicalKey::Code(code) = event.physical_key else {
-                return None;
+        WindowEvent::MouseWheel { delta, .. } => {
+            let (horizontal, lines) = match delta {
+                MouseScrollDelta::LineDelta(x, y) => (*x, *y),
+                MouseScrollDelta::PixelDelta(p) => (
+                    (p.x / PIXELS_PER_LINE) as f32,
+                    (p.y / PIXELS_PER_LINE) as f32,
+                ),
             };
-            PlatformEvent::Key {
-                key: format!("{code:?}"),
-                pressed: event.state.is_pressed(),
-                repeat: event.repeat,
-            }
+            PlatformEvent::MouseWheel { lines, horizontal }
+        }
+        WindowEvent::CursorMoved { position, .. } => PlatformEvent::CursorMoved {
+            x: position.x as f32,
+            y: position.y as f32,
+        },
+        WindowEvent::CursorLeft { .. } => PlatformEvent::CursorLeft,
+        WindowEvent::ModifiersChanged(m) => {
+            let s = m.state();
+            PlatformEvent::Modifiers(Modifiers {
+                shift: s.shift_key(),
+                ctrl: s.control_key(),
+                alt: s.alt_key(),
+                logo: s.super_key(),
+            })
         }
         _ => return None,
     })
+}
+
+/// A key event can carry committed text as well; both are forwarded.
+fn translate_key(event: &winit::event::KeyEvent) -> Vec<PlatformEvent> {
+    let mut out = Vec::with_capacity(2);
+    if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {
+        out.push(PlatformEvent::Key {
+            key: format!("{code:?}"),
+            pressed: event.state.is_pressed(),
+            repeat: event.repeat,
+        });
+    }
+    if event.state.is_pressed()
+        && let Some(text) = &event.text
+        // Control characters (Backspace, Enter, Ctrl+letter) are keys, not text.
+        && text.chars().all(|c| !c.is_control())
+    {
+        out.push(PlatformEvent::Text(text.to_string()));
+    }
+    out
 }

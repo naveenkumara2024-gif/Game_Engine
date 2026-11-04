@@ -20,11 +20,11 @@ pub fn demo_camera() -> Camera {
 /// Scene at `time` seconds. Deterministic: same time, same draws.
 pub fn demo_scene(time: f32) -> Vec<DrawItem> {
     let mut items = Vec::with_capacity((GRID * GRID + 1) as usize);
-    items.push(DrawItem {
-        mesh: MeshKind::Plane,
-        world_from_local: Mat4::from_scale(Vec3::splat(GRID as f32 * SPACING * 0.75)),
-        tint: Vec4::new(0.55, 0.55, 0.58, 1.0),
-    });
+    items.push(DrawItem::new(
+        MeshKind::Plane,
+        Mat4::from_scale(Vec3::splat(GRID as f32 * SPACING * 0.75)),
+        Vec4::new(0.55, 0.55, 0.58, 1.0),
+    ));
     let half = (GRID - 1) as f32 * 0.5;
     for z in 0..GRID {
         for x in 0..GRID {
@@ -37,11 +37,11 @@ pub fn demo_scene(time: f32) -> Vec<DrawItem> {
             );
             let rotation = Quat::from_rotation_y(time * (0.4 + 0.05 * i))
                 * Quat::from_rotation_x(0.3 * (time * 0.7 + phase).sin());
-            items.push(DrawItem {
-                mesh: MeshKind::Cube,
-                world_from_local: Mat4::from_rotation_translation(rotation, position),
-                tint: palette(i / (GRID * GRID) as f32).extend(1.0),
-            });
+            items.push(DrawItem::new(
+                MeshKind::Cube,
+                Mat4::from_rotation_translation(rotation, position),
+                palette(i / (GRID * GRID) as f32).extend(1.0),
+            ));
         }
     }
     items

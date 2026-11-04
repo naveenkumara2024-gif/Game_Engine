@@ -117,6 +117,8 @@ pub enum VertexFormat {
     Float32x2,
     Float32x3,
     Float32x4,
+    /// Four bytes read as 0..1 floats (packed vertex colors).
+    Unorm8x4,
 }
 
 impl VertexFormat {
@@ -125,8 +127,39 @@ impl VertexFormat {
             Self::Float32x2 => wgpu::VertexFormat::Float32x2,
             Self::Float32x3 => wgpu::VertexFormat::Float32x3,
             Self::Float32x4 => wgpu::VertexFormat::Float32x4,
+            Self::Unorm8x4 => wgpu::VertexFormat::Unorm8x4,
         }
     }
+}
+
+/// Color blending for a pipeline's targets. `None` in a descriptor means opaque (overwrite).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum BlendMode {
+    /// `src.rgb * src.a + dst.rgb * (1 - src.a)`.
+    Alpha,
+    /// Color already multiplied by alpha: `src.rgb + dst.rgb * (1 - src.a)` (egui, UI).
+    PremultipliedAlpha,
+}
+
+impl BlendMode {
+    fn to_wgpu(self) -> wgpu::BlendState {
+        match self {
+            Self::Alpha => wgpu::BlendState::ALPHA_BLENDING,
+            Self::PremultipliedAlpha => wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum FilterMode {
+    Nearest,
+    Linear,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum AddressMode {
+    ClampToEdge,
+    Repeat,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -183,12 +216,23 @@ pub struct TextureDesc<'a> {
 }
 
 #[derive(Copy, Clone, Debug)]
+pub struct SamplerDesc<'a> {
+    pub label: &'a str,
+    pub filter: FilterMode,
+    pub address: AddressMode,
+}
+
+#[derive(Copy, Clone, Debug)]
 pub enum BindingType {
     UniformBuffer {
         has_dynamic_offset: bool,
         /// Size of one bound element; checked against the shader at pipeline creation.
         min_binding_size: u64,
     },
+    /// A filterable float 2D texture (`texture_2d<f32>`).
+    Texture2d,
+    /// A filtering sampler.
+    Sampler,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -206,6 +250,8 @@ pub enum BindingResource<'a> {
         /// `None` binds the rest of the buffer.
         size: Option<u64>,
     },
+    Texture(&'a Texture),
+    Sampler(&'a Sampler),
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -246,6 +292,8 @@ pub struct RenderPipelineDesc<'a> {
     pub color_formats: &'a [TextureFormat],
     pub depth: Option<DepthState>,
     pub cull_mode: CullMode,
+    /// `None` = opaque.
+    pub blend: Option<BlendMode>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -279,6 +327,11 @@ impl Texture {
     pub fn format(&self) -> TextureFormat {
         self.format
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct Sampler {
+    pub(crate) inner: wgpu::Sampler,
 }
 
 #[derive(Clone, Debug)]
@@ -364,6 +417,64 @@ impl Rhi {
         }
     }
 
+    /// Uploads `data` (tightly packed rows, the texture's format) into the `size` rectangle at
+    /// `origin`. Lands before the next submitted frame.
+    pub fn write_texture(
+        &self,
+        texture: &Texture,
+        origin: (u32, u32),
+        size: (u32, u32),
+        data: &[u8],
+    ) {
+        let bpp = texture.format.bytes_per_pixel();
+        debug_assert_eq!(data.len() as u64, u64::from(size.0 * size.1 * bpp));
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture.inner,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: origin.0,
+                    y: origin.1,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size.0 * bpp),
+                rows_per_image: Some(size.1),
+            },
+            wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    pub fn create_sampler(&self, desc: &SamplerDesc<'_>) -> Sampler {
+        let filter = match desc.filter {
+            FilterMode::Nearest => wgpu::FilterMode::Nearest,
+            FilterMode::Linear => wgpu::FilterMode::Linear,
+        };
+        let address = match desc.address {
+            AddressMode::ClampToEdge => wgpu::AddressMode::ClampToEdge,
+            AddressMode::Repeat => wgpu::AddressMode::Repeat,
+        };
+        Sampler {
+            inner: self.device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some(desc.label),
+                address_mode_u: address,
+                address_mode_v: address,
+                address_mode_w: address,
+                mag_filter: filter,
+                min_filter: filter,
+                ..Default::default()
+            }),
+        }
+    }
+
     /// Compiles WGSL. Errors are caught with a validation scope and returned instead of
     /// reaching the uncaptured-error handler, so shader hot reload can keep the old version.
     pub fn create_shader_module(&self, label: &str, wgsl: &str) -> Result<ShaderModule, RhiError> {
@@ -402,6 +513,14 @@ impl Rhi {
                         has_dynamic_offset,
                         min_binding_size: wgpu::BufferSize::new(min_binding_size),
                     },
+                    BindingType::Texture2d => wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    BindingType::Sampler => {
+                        wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)
+                    }
                 },
                 count: None,
             })
@@ -436,6 +555,12 @@ impl Rhi {
                         offset,
                         size: size.and_then(wgpu::BufferSize::new),
                     }),
+                    BindingResource::Texture(texture) => {
+                        wgpu::BindingResource::TextureView(&texture.view)
+                    }
+                    BindingResource::Sampler(sampler) => {
+                        wgpu::BindingResource::Sampler(&sampler.inner)
+                    }
                 },
             })
             .collect();
@@ -500,7 +625,7 @@ impl Rhi {
             .map(|f| {
                 Some(wgpu::ColorTargetState {
                     format: f.to_wgpu(),
-                    blend: None,
+                    blend: desc.blend.map(BlendMode::to_wgpu),
                     write_mask: wgpu::ColorWrites::ALL,
                 })
             })

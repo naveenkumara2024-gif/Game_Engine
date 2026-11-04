@@ -14,10 +14,11 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 pub use pass::{DepthAttachment, LoadOp, RenderPass, RenderPassDesc};
 pub use resources::{
-    BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,
-    Buffer, BufferDesc, BufferUsage, CompareFunction, CullMode, DepthState, RenderPipeline,
-    RenderPipelineDesc, ShaderModule, ShaderStages, Texture, TextureDesc, TextureFormat,
-    TextureUsage, VertexAttribute, VertexFormat, VertexLayout,
+    AddressMode, BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
+    BindingType, BlendMode, Buffer, BufferDesc, BufferUsage, CompareFunction, CullMode, DepthState,
+    FilterMode, RenderPipeline, RenderPipelineDesc, Sampler, SamplerDesc, ShaderModule,
+    ShaderStages, Texture, TextureDesc, TextureFormat, TextureUsage, VertexAttribute, VertexFormat,
+    VertexLayout,
 };
 pub use timestamps::{GpuTimings, PassTiming};
 pub use wgpu_backend::{Frame, Rhi, Swapchain};

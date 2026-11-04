@@ -10,13 +10,17 @@ use tracing::{debug, info, info_span, warn};
 
 use crate::input::PlatformEvents;
 use crate::plugin::{Plugin, PluginError, Plugins, build_order};
-use crate::{EngineError, TickGroup, runner};
+use crate::{EngineError, SimulationState, TickGroup, runner};
 
 ge_core::declare_cvar!(pub static P_FIXED_HZ: f32 = (
     "p.FixedHz",
     60.0,
     "Fixed simulation rate in steps per second (the FixedUpdate tick group)"
 ));
+
+/// The reason the engine gives when the OS window is closed. The editor never cancels this
+/// one (it only turns a *game's* quit into "stop playing").
+pub const EXIT_WINDOW_CLOSED: &str = "window closed";
 
 /// Cooperative exit (UE's `RequestEngineExit`): any system may request it; the loop finishes the
 /// current frame and shuts down. The first reason wins.
@@ -37,6 +41,45 @@ impl ExitRequest {
     pub fn reason(&self) -> Option<&str> {
         self.reason.as_deref()
     }
+
+    /// Withdraws a pending request and returns its reason. The editor uses this to turn a
+    /// game's "quit" into "stop playing" instead of closing the editor.
+    pub fn cancel(&mut self) -> Option<String> {
+        let reason = self.reason.take();
+        if let Some(reason) = &reason {
+            info!(reason, "exit request cancelled");
+        }
+        reason
+    }
+}
+
+/// The main window's client area, kept current by the engine (UI layout, picking).
+#[derive(Resource, Copy, Clone, Debug, PartialEq)]
+pub struct WindowInfo {
+    /// Physical pixels.
+    pub size: (u32, u32),
+    /// Physical pixels per logical point (Windows display scaling).
+    pub scale_factor: f32,
+}
+
+impl Default for WindowInfo {
+    fn default() -> Self {
+        Self {
+            size: (1280, 720),
+            scale_factor: 1.0,
+        }
+    }
+}
+
+/// Frame statistics the engine measures, for HUDs and the editor's stats corner. Averaged over
+/// about a second; zero until the first second has passed.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct EngineStats {
+    pub adapter: String,
+    pub backend: String,
+    pub cpu_ms: f32,
+    pub gpu_ms: Option<f32>,
+    pub fps: f32,
 }
 
 pub struct App {
@@ -77,6 +120,9 @@ impl App {
         world.insert_resource(FixedTime::from_hz(f64::from(P_FIXED_HZ.get())));
         world.init_resource::<ExitRequest>();
         world.init_resource::<PlatformEvents>();
+        world.init_resource::<SimulationState>();
+        world.init_resource::<WindowInfo>();
+        world.init_resource::<EngineStats>();
         Self {
             world,
             plugins: Vec::new(),
@@ -167,13 +213,28 @@ impl App {
 
     /// One frame of simulation: every tick group in [`TickGroup::FRAME`] order, with
     /// `FixedUpdate` run as many times as the accumulator owes.
+    ///
+    /// Gameplay groups ([`TickGroup::is_gameplay`]) only run while [`SimulationState`] is
+    /// `Playing`. The fixed-step accumulator doesn't fill while they're skipped, so resuming
+    /// doesn't fast-forward.
     pub fn update(&mut self, raw_delta: Duration) {
         let dt = self.world.resource_mut::<Time>().advance(raw_delta);
+        let playing = self.world.resource::<SimulationState>().runs_gameplay();
 
-        for group in [TickGroup::First, TickGroup::PrePhysics] {
+        self.run_group(TickGroup::First);
+        if playing {
+            self.run_group(TickGroup::PrePhysics);
+            self.run_fixed_steps(dt);
+            self.run_group(TickGroup::PostPhysics);
+            self.run_group(TickGroup::Animation);
+        }
+        for group in [TickGroup::Ui, TickGroup::PostUpdate, TickGroup::Extract] {
             self.run_group(group);
         }
+        self.world.resource_mut::<PlatformEvents>().0.clear();
+    }
 
+    fn run_fixed_steps(&mut self, dt: Duration) {
         {
             let mut fixed = self.world.resource_mut::<FixedTime>();
             fixed.set_hz(f64::from(P_FIXED_HZ.get()));
@@ -185,16 +246,6 @@ impl App {
         while self.world.resource_mut::<FixedTime>().expend() {
             self.run_group(TickGroup::FixedUpdate);
         }
-
-        for group in [
-            TickGroup::PostPhysics,
-            TickGroup::Animation,
-            TickGroup::PostUpdate,
-            TickGroup::Extract,
-        ] {
-            self.run_group(group);
-        }
-        self.world.resource_mut::<PlatformEvents>().0.clear();
     }
 
     fn run_group(&mut self, group: TickGroup) {
@@ -247,6 +298,7 @@ mod tests {
             .add_systems(TickGroup::Extract, log("Extract"))
             .add_systems(TickGroup::PostUpdate, log("PostUpdate"))
             .add_systems(TickGroup::Animation, log("Animation"))
+            .add_systems(TickGroup::Ui, log("Ui"))
             .add_systems(TickGroup::PostPhysics, log("PostPhysics"))
             .add_systems(TickGroup::FixedUpdate, log("FixedUpdate"))
             .add_systems(TickGroup::PrePhysics, log("PrePhysics"))
@@ -263,10 +315,43 @@ mod tests {
                 "FixedUpdate",
                 "PostPhysics",
                 "Animation",
+                "Ui",
                 "PostUpdate",
                 "Extract"
             ]
         );
+    }
+
+    #[test]
+    fn editing_and_paused_skip_gameplay_groups() {
+        for state in [SimulationState::Editing, SimulationState::Paused] {
+            let mut app = App::new();
+            app.init_resource::<Log>()
+                .insert_resource(state)
+                .add_systems(TickGroup::First, log("First"))
+                .add_systems(TickGroup::PrePhysics, log("PrePhysics"))
+                .add_systems(TickGroup::FixedUpdate, log("FixedUpdate"))
+                .add_systems(TickGroup::PostPhysics, log("PostPhysics"))
+                .add_systems(TickGroup::Animation, log("Animation"))
+                .add_systems(TickGroup::Ui, log("Ui"))
+                .add_systems(TickGroup::PostUpdate, log("PostUpdate"))
+                .add_systems(TickGroup::Extract, log("Extract"));
+            app.finish().unwrap();
+            for _ in 0..3 {
+                app.update(FRAME_60HZ);
+            }
+            assert_eq!(
+                app.world().resource::<Log>().0,
+                ["First", "Ui", "PostUpdate", "Extract"].repeat(3),
+                "{state:?}"
+            );
+            // Resuming doesn't owe the skipped fixed steps.
+            app.world_mut().resource_mut::<Log>().0.clear();
+            app.insert_resource(SimulationState::Playing);
+            app.update(FRAME_60HZ);
+            let log = &app.world().resource::<Log>().0;
+            assert_eq!(log.iter().filter(|s| **s == "FixedUpdate").count(), 1);
+        }
     }
 
     /// Simulated distance after 1 s of frames, moving 1 unit/s in `FixedUpdate`.
@@ -304,6 +389,11 @@ mod tests {
         app.request_exit("first");
         app.request_exit("second");
         assert_eq!(app.exit_requested(), Some("first"));
+        let cancelled = app.world_mut().resource_mut::<ExitRequest>().cancel();
+        assert_eq!(cancelled.as_deref(), Some("first"));
+        assert_eq!(app.exit_requested(), None);
+        app.request_exit("third");
+        assert_eq!(app.exit_requested(), Some("third"));
     }
 
     struct Named(&'static str, &'static [&'static str]);
