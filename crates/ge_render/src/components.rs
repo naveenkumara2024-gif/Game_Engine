@@ -10,9 +10,11 @@ use ge_ecs::prelude::*;
 
 use crate::assets::AssetUpload;
 use crate::lighting::{
-    ColorManagement, Light, LightItem, MAX_LIGHTS, Material, R_DIRECT_LIGHT_INTENSITY,
-    R_VIEWPORT_SHADING, ViewportShading, WorldSettings,
+    ColorManagement, Light, LightItem, MAX_LIGHTS, Material, R_DIRECT_LIGHT_INTENSITY, R_LOOK,
+    R_VIEWPORT_SHADING, RenderMethod, RenderWorld, ViewportShading, WorldSettings, dielectric_f0,
 };
+use crate::post::BloomSettings;
+use crate::renderer::DrawAlpha;
 use crate::ui::UiDrawList;
 use crate::{Camera, DrawItem, MeshKind, Overlays};
 
@@ -25,6 +27,8 @@ pub struct MeshRenderer {
     pub tint: Vec4,
     /// A material asset (glTF). An inline [`Material`] component on the same entity wins.
     pub material: Option<AssetId<MaterialAsset>>,
+    /// Object ▸ Visibility ▸ Shadow: whether this object casts shadows.
+    pub cast_shadow: bool,
 }
 
 impl MeshRenderer {
@@ -33,6 +37,7 @@ impl MeshRenderer {
             mesh,
             tint: Vec3::from(tint).extend(1.0),
             material: None,
+            cast_shadow: true,
         }
     }
 }
@@ -93,8 +98,10 @@ pub struct RenderSnapshot {
     pub items: Vec<DrawItem>,
     pub lights: Vec<LightItem>,
     /// `None` when the app has no `WorldSettings` (the renderer uses `r.ClearColor`).
-    pub world: Option<WorldSettings>,
+    pub world: Option<RenderWorld>,
     pub color: ColorManagement,
+    pub look: i32,
+    pub bloom: BloomSettings,
     pub shading: ViewportShading,
     pub direct_light: f32,
     pub overlays: Overlays,
@@ -177,6 +184,7 @@ pub fn extract_render_snapshot(
                 .filter(|(.., v)| visible(*v))
                 .map(|(global, mesh, material, _)| {
                     let mut item = DrawItem::new(mesh.mesh, global.to_mat4(), mesh.tint);
+                    item.cast_shadow = mesh.cast_shadow;
                     // Material asset first (factors + textures); an inline Material overrides.
                     if material.is_none()
                         && let (Some(id), Some(server)) = (mesh.material, assets.as_deref())
@@ -189,6 +197,13 @@ pub fn extract_render_snapshot(
                         item.emission = Vec3::from(m.emissive);
                         item.double_sided = m.double_sided;
                         item.material_asset = Some(id);
+                        item.tint.w = mesh.tint.w * m.base_color[3];
+                        item.normal_strength = m.normal_scale;
+                        item.alpha = match m.alpha_mode {
+                            ge_asset::AlphaMode::Opaque => DrawAlpha::Opaque,
+                            ge_asset::AlphaMode::Mask => DrawAlpha::Mask(m.alpha_cutoff),
+                            ge_asset::AlphaMode::Blend => DrawAlpha::Blend,
+                        };
                     }
                     if let Some(m) = material {
                         // Inline factors win; the asset's textures (if any) still apply.
@@ -198,6 +213,16 @@ pub fn extract_render_snapshot(
                         item.roughness = m.roughness;
                         item.emission = m.emission_color * m.emission_strength.max(0.0);
                         item.double_sided = !m.backface_culling;
+                        item.tint.w = mesh.tint.w * m.alpha.clamp(0.0, 1.0);
+                        item.f0 = dielectric_f0(m.ior, m.specular_ior_level);
+                        item.shadow_double_sided = !m.backface_culling_shadow;
+                        item.transparent_shadows = m.transparent_shadows;
+                        // Blender's "Dithered" needs TAA (M12); a 0.5 cutout stands in for it.
+                        item.alpha = match m.render_method {
+                            RenderMethod::Blended if m.alpha < 1.0 => DrawAlpha::Blend,
+                            RenderMethod::Dithered if m.alpha < 1.0 => DrawAlpha::Mask(0.5),
+                            _ => item.alpha,
+                        };
                     }
                     item
                 }),
@@ -212,8 +237,10 @@ pub fn extract_render_snapshot(
             .map(|(global, light, _)| LightItem::from_light(light, global)),
     );
 
-    snapshot.world = world.map(|w| *w);
+    snapshot.world = world.map(|w| w.to_render());
     snapshot.color = ColorManagement::from_cvars();
+    snapshot.look = R_LOOK.get();
+    snapshot.bloom = BloomSettings::from_cvars();
     snapshot.shading = match R_VIEWPORT_SHADING.get() {
         1 => ViewportShading::Rendered,
         _ => ViewportShading::Solid,

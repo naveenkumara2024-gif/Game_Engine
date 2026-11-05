@@ -5,6 +5,7 @@
 //! No scene concepts live here — just device, swapchain, frames, resources, passes and
 //! GPU timestamps.
 
+mod compute;
 mod pass;
 mod resources;
 mod timestamps;
@@ -12,13 +13,16 @@ mod wgpu_backend;
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
-pub use pass::{DepthAttachment, LoadOp, RenderPass, RenderPassDesc};
+pub use compute::{ComputePass, ComputePipeline, ComputePipelineDesc, RhiLimits};
+pub use pass::{
+    ColorTarget, DepthAttachment, DepthTarget, LoadOp, RenderPass, RenderPassDesc, TargetPassDesc,
+};
 pub use resources::{
     AddressMode, BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
-    BindingType, BlendMode, Buffer, BufferDesc, BufferUsage, CompareFunction, CullMode, DepthState,
-    FilterMode, RenderPipeline, RenderPipelineDesc, Sampler, SamplerDesc, ShaderModule,
-    ShaderStages, Texture, TextureDesc, TextureFormat, TextureUsage, VertexAttribute, VertexFormat,
-    VertexLayout,
+    BindingType, BlendMode, Buffer, BufferDesc, BufferUsage, CompareFunction, CullMode, DepthBias,
+    DepthState, FilterMode, RenderPipeline, RenderPipelineDesc, SampleKind, Sampler, SamplerDesc,
+    ShaderModule, ShaderStages, Texture, TextureDesc, TextureDescEx, TextureDim, TextureFormat,
+    TextureUsage, TextureView, VertexAttribute, VertexFormat, VertexLayout, ViewRange,
 };
 pub use timestamps::{GpuTimings, PassTiming};
 pub use wgpu_backend::{Frame, Rhi, Swapchain};

@@ -17,6 +17,8 @@ pub enum Importer {
     Gltf,
     Image,
     Ktx2,
+    /// Radiance `.hdr` (RGBE) environment maps → half-float RGBA.
+    Hdr,
 }
 
 impl Importer {
@@ -24,6 +26,7 @@ impl Importer {
         Some(match ext.to_ascii_lowercase().as_str() {
             "glb" | "gltf" => Self::Gltf,
             "png" | "jpg" | "jpeg" => Self::Image,
+            "hdr" => Self::Hdr,
             "ktx2" => Self::Ktx2,
             _ => return None,
         })
@@ -34,6 +37,7 @@ impl Importer {
             Self::Gltf => "gltf",
             Self::Image => "image",
             Self::Ktx2 => "ktx2",
+            Self::Hdr => "hdr",
         }
     }
 
@@ -41,7 +45,7 @@ impl Importer {
     pub fn version(self) -> u32 {
         match self {
             Self::Gltf => gltf::IMPORTER_VERSION,
-            Self::Image | Self::Ktx2 => 1,
+            Self::Image | Self::Ktx2 | Self::Hdr => 1,
         }
     }
 
@@ -49,7 +53,7 @@ impl Importer {
     pub fn main_label(self) -> &'static str {
         match self {
             Self::Gltf => "Model",
-            Self::Image | Self::Ktx2 => "Texture",
+            Self::Image | Self::Ktx2 | Self::Hdr => "Texture",
         }
     }
 
@@ -89,6 +93,12 @@ impl Importer {
             }
             Self::Ktx2 => Ok(ImportOutput {
                 assets: vec![("Texture".into(), SubAsset::Texture(ktx2::import(bytes)?))],
+            }),
+            Self::Hdr => Ok(ImportOutput {
+                assets: vec![(
+                    "Texture".into(),
+                    SubAsset::Texture(image::decode_hdr(bytes)?),
+                )],
             }),
         }
     }

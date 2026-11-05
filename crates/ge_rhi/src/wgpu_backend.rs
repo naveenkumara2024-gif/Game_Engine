@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use tracing::{error, info, info_span, warn};
 
-use crate::pass::{RenderPass, RenderPassDesc, load_color, load_depth};
+use crate::compute::ComputePass;
+use crate::pass::{RenderPass, RenderPassDesc, TargetPassDesc, load_color, load_depth};
 use crate::timestamps::{FrameQueries, GpuProfiler};
 use crate::{
     AdapterSummary, GpuKind, GpuTimings, R_ALLOW_INTEGRATED_GPU, R_GPU_TIMESTAMPS, R_VSYNC,
@@ -427,6 +428,79 @@ impl Frame {
     }
 
     /// Begins a labeled, timestamped pass. The color attachment is the frame's target.
+    /// The color target this frame presents (as a view, for [`Frame::pass_to`]).
+    pub fn backbuffer(&self) -> crate::TextureView {
+        crate::TextureView::from_raw(self.view.clone(), self.size)
+    }
+
+    /// Begins a labelled, timestamped pass into arbitrary targets.
+    pub fn pass_to(&mut self, desc: &TargetPassDesc<'_>) -> RenderPass<'_> {
+        let span = info_span!("Render::Pass", pass = desc.label).entered();
+        let Frame {
+            encoder, queries, ..
+        } = self;
+        let mut queries = queries.as_mut();
+        let timestamp_writes = queries.as_mut().and_then(|q| q.pass_writes(desc.label));
+        let colors: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> = desc
+            .color
+            .iter()
+            .map(|c| {
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &c.view.inner,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: load_color(c.load),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })
+            })
+            .collect();
+        let inner = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(desc.label),
+            color_attachments: &colors,
+            depth_stencil_attachment: desc.depth.map(|d| wgpu::RenderPassDepthStencilAttachment {
+                view: &d.view.inner,
+                depth_ops: Some(wgpu::Operations {
+                    load: load_depth(d.load),
+                    store: if d.store {
+                        wgpu::StoreOp::Store
+                    } else {
+                        wgpu::StoreOp::Discard
+                    },
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        RenderPass {
+            inner: inner.forget_lifetime(),
+            queries,
+            _span: span,
+        }
+    }
+
+    /// Begins a labelled, timestamped compute pass.
+    pub fn compute_pass(&mut self, label: &'static str) -> ComputePass<'_> {
+        let span = info_span!("Render::Compute", pass = label).entered();
+        let Frame {
+            encoder, queries, ..
+        } = self;
+        let mut queries = queries.as_mut();
+        let timestamp_writes = queries.as_mut().and_then(|q| q.compute_writes(label));
+        let inner = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(label),
+            timestamp_writes,
+        });
+        ComputePass {
+            inner: inner.forget_lifetime(),
+            queries,
+            _span: span,
+        }
+    }
+
     pub fn render_pass(&mut self, desc: &RenderPassDesc<'_>) -> RenderPass<'_> {
         let span = info_span!("Render::Pass", pass = desc.label).entered();
         let Frame {

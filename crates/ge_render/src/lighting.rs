@@ -63,8 +63,19 @@ ge_core::declare_cvar!(pub static R_VIEWPORT_SHADING: i32 = (
     "0 = Solid (fixed studio light), 1 = Rendered (scene lights + world). Normals: r.DebugNormals"
 ));
 
-/// Lights the forward pass evaluates per pixel. M4 clustering lifts the cap.
-pub const MAX_LIGHTS: usize = 16;
+ge_core::declare_cvar!(pub static R_LIGHT_THRESHOLD: f32 = (
+    "r.LightThreshold",
+    0.01,
+    "Irradiance below which a light's influence ends (sets every light's range for culling)"
+));
+ge_core::declare_cvar!(pub static R_LOOK: i32 = (
+    "r.Look",
+    0,
+    "Look: 0 None, 1 Punchy, 2 Base Contrast, 3 High Contrast, 4 Very High Contrast"
+));
+
+/// Lights the renderer accepts per frame (clustered; lore §6.7).
+pub const MAX_LIGHTS: usize = 1024;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum ViewTransform {
@@ -347,6 +358,32 @@ pub struct Light {
     pub transmission_factor: f32,
     pub volume_factor: f32,
     pub cast_shadow: bool,
+    /// Area light outline (disk and ellipse are shaded as their bounding rectangle in v1).
+    pub area_shape: AreaShape,
+    /// Shadow edge blur in shadow texels (Blender's shadow Filter).
+    pub shadow_filter: f32,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum AreaShape {
+    #[default]
+    Square,
+    Rectangle,
+    Disk,
+    Ellipse,
+}
+
+impl AreaShape {
+    pub const ALL: [AreaShape; 4] = [Self::Square, Self::Rectangle, Self::Disk, Self::Ellipse];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Square => "Square",
+            Self::Rectangle => "Rectangle",
+            Self::Disk => "Disk",
+            Self::Ellipse => "Ellipse",
+        }
+    }
 }
 
 impl Light {
@@ -370,9 +407,25 @@ impl Light {
         let intensity = match self.kind {
             LightKind::Point | LightKind::Spot => p / (4.0 * PI),
             LightKind::Sun => p,
-            LightKind::Area => p / PI,
+            LightKind::Area => {
+                // Normalize keeps the power independent of the size; off, bigger = brighter.
+                let area = self.area_half_size().x * self.area_half_size().y * 4.0;
+                if self.normalize {
+                    p / PI
+                } else {
+                    p / PI * area.max(1e-4)
+                }
+            }
         };
         base * intensity
+    }
+
+    /// Half width/height of an area light in metres (square uses `size.x` for both).
+    pub fn area_half_size(&self) -> Vec2 {
+        match self.area_shape {
+            AreaShape::Square | AreaShape::Disk => Vec2::splat(self.size.x * 0.5),
+            AreaShape::Rectangle | AreaShape::Ellipse => self.size * 0.5,
+        }
     }
 }
 
@@ -400,6 +453,8 @@ impl Default for Light {
             transmission_factor: 1.0,
             volume_factor: 1.0,
             cast_shadow: true,
+            area_shape: AreaShape::Square,
+            shadow_filter: 1.0,
         }
     }
 }
@@ -416,6 +471,32 @@ pub struct Material {
     pub emission_strength: f32,
     /// Blender's default is off (both sides drawn and lit).
     pub backface_culling: bool,
+    /// Opacity (multiplies the base color texture's alpha).
+    pub alpha: f32,
+    pub render_method: RenderMethod,
+    /// Index of refraction: sets how reflective the surface is head-on (glass 1.5, water 1.33).
+    pub ior: f32,
+    /// 0.5 keeps the physical reflectance from the IOR; 0 removes it, 1 doubles it.
+    pub specular_ior_level: f32,
+    pub transparent_shadows: bool,
+    pub backface_culling_shadow: bool,
+}
+
+/// Blender's Render Method. *Dithered* is stochastic transparency that needs TAA (M12); until
+/// then it renders as an alpha **cutout** at 0.5, which looks the same for fully opaque or
+/// fully clear pixels.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum RenderMethod {
+    #[default]
+    Dithered,
+    Blended,
+}
+
+/// Dielectric reflectance at normal incidence from IOR and Specular IOR Level.
+pub fn dielectric_f0(ior: f32, specular_level: f32) -> f32 {
+    let ior = ior.max(1.0);
+    let f0 = ((ior - 1.0) / (ior + 1.0)).powi(2);
+    (f0 * 2.0 * specular_level.clamp(0.0, 1.0)).clamp(0.0, 1.0)
 }
 
 impl Default for Material {
@@ -428,16 +509,40 @@ impl Default for Material {
             emission_color: Vec3::ONE,
             emission_strength: 0.0,
             backface_culling: false,
+            alpha: 1.0,
+            render_method: RenderMethod::Dithered,
+            ior: 1.5,
+            specular_ior_level: 0.5,
+            transparent_shadows: false,
+            backface_culling_shadow: false,
         }
     }
 }
 
-/// The world (World tab): background color and a flat ambient term in Rendered shading.
-#[derive(Resource, Copy, Clone, Debug, PartialEq)]
+/// Where the world's light comes from (World ▸ Surface).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum WorldSurface {
+    /// One color from every direction.
+    #[default]
+    Color,
+    /// Our procedural daylight sky, following the scene's sun.
+    Sky,
+    /// An equirectangular `.hdr` image from `assets/`.
+    Hdri,
+}
+
+/// The world (World tab): background, ambient light and reflections (IBL, plan 0006).
+#[derive(Resource, Clone, Debug, PartialEq)]
 pub struct WorldSettings {
-    /// Linear RGB.
+    /// Linear RGB (Color surface, and the tint of the Sky).
     pub color: Vec3,
     pub strength: f32,
+    pub surface: WorldSurface,
+    pub hdri: Option<ge_asset::Handle<ge_asset::Texture>>,
+    /// Turns the HDRI around the vertical axis (radians).
+    pub hdri_rotation: f32,
+    /// Cube map face size for the environment probe (World ▸ Light Probe ▸ Resolution).
+    pub probe_resolution: u32,
 }
 
 impl Default for WorldSettings {
@@ -445,6 +550,10 @@ impl Default for WorldSettings {
         Self {
             color: Vec3::new(0.10, 0.20, 0.40),
             strength: 1.0,
+            surface: WorldSurface::Color,
+            hdri: None,
+            hdri_rotation: 0.0,
+            probe_resolution: 512,
         }
     }
 }
@@ -452,6 +561,34 @@ impl Default for WorldSettings {
 impl WorldSettings {
     pub fn radiance(&self) -> Vec3 {
         self.color * self.strength.max(0.0)
+    }
+
+    pub fn to_render(&self) -> RenderWorld {
+        RenderWorld {
+            color: self.color,
+            strength: self.strength.max(0.0),
+            surface: self.surface,
+            hdri: self.hdri.as_ref().map(ge_asset::Handle::id),
+            hdri_rotation: self.hdri_rotation,
+            probe_resolution: self.probe_resolution.clamp(16, 2048).next_power_of_two(),
+        }
+    }
+}
+
+/// Plain-data copy of [`WorldSettings`] for the renderer.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct RenderWorld {
+    pub color: Vec3,
+    pub strength: f32,
+    pub surface: WorldSurface,
+    pub hdri: Option<ge_asset::AssetId<ge_asset::Texture>>,
+    pub hdri_rotation: f32,
+    pub probe_resolution: u32,
+}
+
+impl RenderWorld {
+    pub fn radiance(&self) -> Vec3 {
+        self.color * self.strength
     }
 }
 
@@ -462,18 +599,30 @@ pub struct LightItem {
     pub position: Vec3,
     /// Direction the light travels (local −Z in world space), normalized.
     pub direction: Vec3,
+    /// Local +Y in world space (area light orientation, shadow "up").
+    pub up: Vec3,
     pub radiance: Vec3,
-    /// 0 = unlimited.
-    pub cutoff: f32,
+    /// Where the light's influence ends (0 = unlimited): Custom Distance, else from the
+    /// Light Threshold.
+    pub range: f32,
     pub spot_cos: f32,
     pub spot_blend: f32,
+    /// Full spot cone angle (radians), for its shadow frustum.
+    pub spot_size: f32,
     pub diffuse: f32,
     pub specular: f32,
+    /// Sphere radius (point/spot soft size).
+    pub radius: f32,
+    pub soft_falloff: bool,
+    /// Sun angular radius (half the Angle).
+    pub sun_angular_radius: f32,
+    pub area_half_size: Vec2,
+    pub cast_shadow: bool,
+    pub shadow_filter: f32,
 }
 
 impl LightItem {
     pub fn from_light(light: &Light, global: &GlobalTransform) -> Self {
-        // Area lights are a 180° cone with cosine emission in v0 (see module docs).
         let (spot_cos, spot_blend) = match light.kind {
             LightKind::Spot => {
                 let c = (light.spot_size.clamp(1e-3, PI) * 0.5).cos();
@@ -481,47 +630,80 @@ impl LightItem {
             }
             _ => (-1.0, 0.0),
         };
+        let radiance = light.radiance();
+        let range = if light.kind == LightKind::Sun {
+            0.0
+        } else if light.use_custom_distance {
+            light.custom_distance.max(1e-3)
+        } else {
+            // EEVEE's rule: the light reaches as far as its irradiance stays above the
+            // threshold, I / d² = threshold.
+            let threshold = R_LIGHT_THRESHOLD.get().max(1e-6);
+            (radiance.max_element() / threshold).sqrt()
+        };
         Self {
             kind: light.kind,
             position: global.translation(),
             direction: global.forward().normalize_or(Vec3::NEG_Y),
-            radiance: light.radiance(),
-            cutoff: if light.use_custom_distance {
-                light.custom_distance.max(1e-3)
-            } else {
-                0.0
-            },
+            up: global.up().normalize_or(Vec3::Y),
+            radiance,
+            range,
             spot_cos,
             spot_blend,
+            spot_size: light.spot_size,
             diffuse: light.diffuse_factor.max(0.0),
             specular: light.specular_factor.max(0.0),
+            radius: light.radius.max(0.0),
+            soft_falloff: light.soft_falloff,
+            sun_angular_radius: light.angle.max(0.0) * 0.5,
+            area_half_size: light.area_half_size(),
+            cast_shadow: light.cast_shadow,
+            shadow_filter: light.shadow_filter.max(0.0),
         }
     }
 }
 
-/// Matches `Light` in `shaders/common/lighting.wesl`.
+/// Matches `Light` in `shaders/common/lighting.wesl` (96 bytes).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub(crate) struct LightUniform {
-    position_cutoff: [f32; 4],
+    position_range: [f32; 4],
     direction_kind: [f32; 4],
     radiance_diffuse: [f32; 4],
     spot_specular: [f32; 4],
+    up_shadow: [f32; 4],
+    shape: [f32; 4],
 }
 
 impl LightUniform {
-    pub(crate) fn pack(item: &LightItem) -> Self {
+    /// `shadow_slot`: CSM (sun, any value ≥ 0) or the first atlas view; `None` = unshadowed.
+    pub(crate) fn pack(item: &LightItem, shadow_slot: Option<u32>) -> Self {
         let kind = match item.kind {
             LightKind::Point => 0.0,
             LightKind::Sun => 1.0,
             LightKind::Spot => 2.0,
             LightKind::Area => 3.0,
         };
+        let radius = if item.kind == LightKind::Area {
+            0.0
+        } else {
+            item.radius
+        };
         Self {
-            position_cutoff: item.position.extend(item.cutoff).to_array(),
+            position_range: item.position.extend(item.range).to_array(),
             direction_kind: item.direction.extend(kind).to_array(),
             radiance_diffuse: item.radiance.extend(item.diffuse).to_array(),
-            spot_specular: [item.spot_cos, item.spot_blend, item.specular, 0.0],
+            spot_specular: [item.spot_cos, item.spot_blend, item.specular, radius],
+            up_shadow: item
+                .up
+                .extend(shadow_slot.map_or(-1.0, |s| s as f32))
+                .to_array(),
+            shape: [
+                item.area_half_size.x,
+                item.area_half_size.y,
+                item.sun_angular_radius,
+                if item.soft_falloff { 1.0 } else { 0.0 },
+            ],
         }
     }
 }
@@ -608,7 +790,39 @@ mod tests {
     }
 
     #[test]
-    fn light_uniform_is_64_bytes() {
-        assert_eq!(size_of::<LightUniform>(), 64);
+    fn light_uniform_is_96_bytes() {
+        assert_eq!(size_of::<LightUniform>(), 96);
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+
+    #[test]
+    fn range_follows_threshold_and_custom_distance() {
+        let g = GlobalTransform::default();
+        let mut l = Light::new(LightKind::Point);
+        let item = LightItem::from_light(&l, &g);
+        let i = 1000.0 / (4.0 * PI);
+        assert!(
+            (item.range - (i / 0.01f32).sqrt()).abs() < 1e-3,
+            "{}",
+            item.range
+        );
+        l.use_custom_distance = true;
+        l.custom_distance = 5.0;
+        assert_eq!(LightItem::from_light(&l, &g).range, 5.0);
+        assert_eq!(
+            LightItem::from_light(&Light::new(LightKind::Sun), &g).range,
+            0.0
+        );
+    }
+
+    #[test]
+    fn f0_from_ior() {
+        assert!((dielectric_f0(1.5, 0.5) - 0.04).abs() < 1e-4);
+        assert_eq!(dielectric_f0(1.5, 0.0), 0.0);
+        assert!((dielectric_f0(1.5, 1.0) - 0.08).abs() < 1e-4);
     }
 }

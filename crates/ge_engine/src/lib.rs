@@ -18,7 +18,9 @@ mod plugins;
 mod runner;
 mod schedule;
 
-pub use app::{App, EXIT_WINDOW_CLOSED, EngineStats, ExitRequest, P_FIXED_HZ, WindowInfo};
+pub use app::{
+    App, EXIT_WINDOW_CLOSED, EngineStats, ExitRequest, P_FIXED_HZ, WindowInfo, WindowStatus,
+};
 pub use ge_platform::{Modifiers, MouseButton, PlatformEvent, WindowDesc};
 pub use pacing::T_MAX_FPS;
 pub use plugin::{Plugin, PluginError, Plugins};
@@ -43,12 +45,12 @@ pub mod prelude {
     pub use crate::input::{ActionState, Axis2dBinding, Binding, InputMap, PlatformEvents};
     pub use crate::{
         App, DefaultPlugins, EngineStats, ExitRequest, MouseButton, Plugin, Plugins,
-        SimulationState, TickGroup, WindowDesc, WindowInfo,
+        SimulationState, TickGroup, WindowDesc, WindowInfo, WindowStatus,
     };
     pub use ge_asset::{AssetServer, Handle, ModelAsset};
     pub use ge_render::{
         Camera3d, Light, LightKind, Material, MeshKind, MeshRenderer, Primitive, PrimitiveMesh,
-        SceneRoot, Visibility, WorldSettings,
+        RenderMethod, SceneRoot, Visibility, WorldSettings,
     };
 }
 

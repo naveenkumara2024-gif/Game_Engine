@@ -1192,6 +1192,7 @@ name = "game"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ge_core",
  "ge_engine",
  "mimalloc",
  "sample",
@@ -2985,9 +2986,11 @@ dependencies = [
 name = "sample"
 version = "0.1.0"
 dependencies = [
+ "ge_core",
  "ge_engine",
  "ge_platform",
  "ge_render",
+ "tracing",
 ]
 
 [[package]]

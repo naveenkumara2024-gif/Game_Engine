@@ -13,7 +13,7 @@ use crate::meta::{ImportSettings, write_atomic};
 use crate::types::ImportOutput;
 
 /// Bump when the payload layout (`types.rs`) changes: every old entry then misses.
-pub const DDC_FORMAT_VERSION: u32 = 1;
+pub const DDC_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub struct Ddc {

@@ -53,6 +53,7 @@ fn map_format(f: ktx2::Format) -> Option<PixelFormat> {
         F::BC5_UNORM_BLOCK => PixelFormat::Bc5,
         F::BC7_UNORM_BLOCK => PixelFormat::Bc7,
         F::BC7_SRGB_BLOCK => PixelFormat::Bc7Srgb,
+        F::R16G16B16A16_SFLOAT => PixelFormat::Rgba16Float,
         _ => return None,
     })
 }
@@ -71,6 +72,7 @@ pub fn write(format: PixelFormat, width: u32, height: u32, mips: &[Vec<u8>]) -> 
         PixelFormat::Bc5 => 141,
         PixelFormat::Bc7 => 145,
         PixelFormat::Bc7Srgb => 146,
+        PixelFormat::Rgba16Float => 97,
     };
     // typeSize is 1 for block-compressed and 8-bit formats.
     let type_size: u32 = 1;

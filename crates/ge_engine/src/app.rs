@@ -82,6 +82,11 @@ pub struct EngineStats {
     pub fps: f32,
 }
 
+/// A short status line the game shows in the window title (score, timer, …) until game UI
+/// arrives (M9). Shown as soon as it changes; empty = nothing.
+#[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WindowStatus(pub String);
+
 pub struct App {
     world: World,
     plugins: Vec<Box<dyn Plugin>>,
@@ -123,6 +128,7 @@ impl App {
         world.init_resource::<SimulationState>();
         world.init_resource::<WindowInfo>();
         world.init_resource::<EngineStats>();
+        world.init_resource::<WindowStatus>();
         Self {
             world,
             plugins: Vec::new(),
@@ -269,6 +275,14 @@ impl App {
         for e in ge_core::cvar::apply_command_line(&self.args) {
             warn!(error = %e, "ignoring command-line cvar");
         }
+        // `-cvar win.Width=1920 -cvar win.Height=1080` (physical pixels) for repeatable
+        // benchmarks; 0 keeps the size the app asked for.
+        if W_WIDTH.get() > 0 {
+            self.window.width = W_WIDTH.get();
+        }
+        if W_HEIGHT.get() > 0 {
+            self.window.height = W_HEIGHT.get();
+        }
         self.finish()?;
         let mut engine = runner::Engine::new(self);
         ge_platform::run(&mut engine)?;
@@ -276,6 +290,19 @@ impl App {
         Ok(())
     }
 }
+
+ge_core::declare_cvar!(pub static W_WIDTH: u32 = (
+    "win.Width",
+    0,
+    "Initial window client width in physical pixels (0 = the app's choice); read at startup",
+    ge_core::cvar::CVarFlags::READ_ONLY
+));
+ge_core::declare_cvar!(pub static W_HEIGHT: u32 = (
+    "win.Height",
+    0,
+    "Initial window client height in physical pixels (0 = the app's choice); read at startup",
+    ge_core::cvar::CVarFlags::READ_ONLY
+));
 
 #[cfg(test)]
 mod tests {

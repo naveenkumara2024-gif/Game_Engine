@@ -80,6 +80,7 @@ pub fn spawn_scenes(
                         mesh: MeshKind::Asset(*mesh),
                         tint: Vec4::ONE,
                         material: *material,
+                        cast_shadow: true,
                     });
                 }
                 many => {
@@ -93,6 +94,7 @@ pub fn spawn_scenes(
                                 mesh: MeshKind::Asset(*mesh),
                                 tint: Vec4::ONE,
                                 material: *material,
+                                cast_shadow: true,
                             },
                         ));
                     }

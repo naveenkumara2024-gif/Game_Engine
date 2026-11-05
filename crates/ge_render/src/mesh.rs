@@ -13,9 +13,11 @@ pub struct Vertex {
     pub color: [f32; 3],
     /// Texture coordinate (glTF convention: origin top-left, V down).
     pub uv: [f32; 2],
+    /// Tangent (xyz) and bitangent sign (w), MikkTSpace convention, for normal maps.
+    pub tangent: [f32; 4],
 }
 
-const VERTEX_ATTRIBUTES: [VertexAttribute; 4] = [
+const VERTEX_ATTRIBUTES: [VertexAttribute; 5] = [
     VertexAttribute {
         location: 0,
         offset: 0,
@@ -35,6 +37,11 @@ const VERTEX_ATTRIBUTES: [VertexAttribute; 4] = [
         location: 3,
         offset: 36,
         format: VertexFormat::Float32x2,
+    },
+    VertexAttribute {
+        location: 4,
+        offset: 44,
+        format: VertexFormat::Float32x4,
     },
 ];
 
@@ -92,10 +99,61 @@ impl MeshData {
                 normal: normal.to_array(),
                 color,
                 uv: [(su + 1.0) * 0.5, (1.0 - sv) * 0.5],
+                // +U runs along `u`, +V (down the texture) along −v.
+                tangent: u.normalize().extend(1.0).to_array(),
             });
         }
         self.indices
             .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    /// Per-vertex tangents from UVs (accumulated per triangle, Gram-Schmidt against the
+    /// normal). Procedural meshes use this; imported meshes bring MikkTSpace tangents.
+    pub fn generate_tangents(&mut self) {
+        let n = self.vertices.len();
+        let mut tan = vec![Vec3::ZERO; n];
+        let mut bit = vec![Vec3::ZERO; n];
+        for tri in self.indices.chunks_exact(3) {
+            let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+            if a.max(b).max(c) >= n {
+                continue;
+            }
+            let (pa, pb, pc) = (
+                Vec3::from(self.vertices[a].position),
+                Vec3::from(self.vertices[b].position),
+                Vec3::from(self.vertices[c].position),
+            );
+            let (ua, ub, uc) = (
+                self.vertices[a].uv,
+                self.vertices[b].uv,
+                self.vertices[c].uv,
+            );
+            let e1 = pb - pa;
+            let e2 = pc - pa;
+            let (du1, dv1) = (ub[0] - ua[0], ub[1] - ua[1]);
+            let (du2, dv2) = (uc[0] - ua[0], uc[1] - ua[1]);
+            let det = du1 * dv2 - du2 * dv1;
+            if det.abs() < 1e-12 {
+                continue;
+            }
+            let r = 1.0 / det;
+            let t = (e1 * dv2 - e2 * dv1) * r;
+            let b_ = (e2 * du1 - e1 * du2) * r;
+            for i in [a, b, c] {
+                tan[i] += t;
+                bit[i] += b_;
+            }
+        }
+        for (i, v) in self.vertices.iter_mut().enumerate() {
+            let nrm = Vec3::from(v.normal);
+            let t = (tan[i] - nrm * nrm.dot(tan[i])).normalize_or(nrm.any_orthonormal_vector());
+            let w = if nrm.cross(t).dot(bit[i]) < 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
+            v.tangent = t.extend(w).to_array();
+        }
     }
 
     /// Every index points at a vertex and the index count is a whole number of triangles.
@@ -182,6 +240,6 @@ mod tests {
 
     #[test]
     fn vertex_layout_matches_struct() {
-        assert_eq!(Vertex::LAYOUT.stride, 44);
+        assert_eq!(Vertex::LAYOUT.stride, 60);
     }
 }

@@ -62,17 +62,47 @@ fn plank_png() -> Vec<u8> {
     png
 }
 
+/// The planks' tangent-space normal map (PNG, linear): grooves at the seams and a faint
+/// grain, so the crate shows normal mapping (plan 0006).
+fn plank_normal_png() -> Vec<u8> {
+    // Height field: 0 in the 2-texel groove around each seam, 1 on the plank, plus grain.
+    let height = |x: i32, y: i32| -> f32 {
+        let x = x.rem_euclid(64) as u32;
+        let y = y.rem_euclid(64) as u32;
+        let plank = y / 16;
+        let dy = (y % 16).min(16 - y % 16);
+        let dx = ((x + plank * 23) % 64).min(64 - (x + plank * 23) % 64);
+        let groove = (dy.min(dx) as f32 / 2.0).min(1.0);
+        groove + (x as f32 * 0.35 + plank as f32 * 1.7).sin() * 0.03
+    };
+    let img = image::RgbaImage::from_fn(64, 64, |x, y| {
+        let (x, y) = (x as i32, y as i32);
+        // Central differences; +V points down the image (glTF UVs), so flip the y slope.
+        let du = (height(x + 1, y) - height(x - 1, y)) * 0.5 * 1.5;
+        let dv = (height(x, y + 1) - height(x, y - 1)) * 0.5 * 1.5;
+        let n = [-du, dv, 1.0];
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        let enc = |c: f32| ((c / len * 0.5 + 0.5) * 255.0).round() as u8;
+        image::Rgba([enc(n[0]), enc(n[1]), enc(n[2]), 255])
+    });
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .expect("encode png");
+    png
+}
+
 fn pad4(v: &mut Vec<u8>, byte: u8) {
     while !v.len().is_multiple_of(4) {
         v.push(byte);
     }
 }
 
-/// `crate.glb`: a wooden crate (plank texture, roughness 0.7) with a metal band child node
-/// (untextured, metallic). Two materials, one mesh, two nodes.
+/// `crate.glb`: a wooden crate (plank texture + normal map, roughness 0.7) with a metal band
+/// child node (untextured, metallic). Two materials, two textures, two nodes.
 pub fn crate_glb() -> Vec<u8> {
     let (pos, nrm, uv, idx) = box_mesh([0.5, 0.5, 0.5]);
     let png = plank_png();
+    let normal_png = plank_normal_png();
     let mut bin = Vec::new();
     let mut views = Vec::new(); // (offset, length, target)
     let mut push = |bin: &mut Vec<u8>, bytes: &[u8], target: Option<u32>| {
@@ -104,6 +134,7 @@ pub fn crate_glb() -> Vec<u8> {
         Some(34963),
     );
     push(&mut bin, &png, None);
+    push(&mut bin, &normal_png, None);
     pad4(&mut bin, 0);
 
     let view_json: Vec<String> = views
@@ -123,10 +154,10 @@ pub fn crate_glb() -> Vec<u8> {
  {{"name":"Box","primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2}},"indices":3,"material":0}}]}},
  {{"name":"BandBox","primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2}},"indices":3,"material":1}}]}}],
 "materials":[
- {{"name":"Wood","pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}},"metallicFactor":0.0,"roughnessFactor":0.7}}}},
+ {{"name":"Wood","pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}},"metallicFactor":0.0,"roughnessFactor":0.7}},"normalTexture":{{"index":1}}}},
  {{"name":"Metal","pbrMetallicRoughness":{{"baseColorFactor":[0.55,0.56,0.6,1.0],"metallicFactor":1.0,"roughnessFactor":0.3}}}}],
-"textures":[{{"source":0}}],
-"images":[{{"bufferView":4,"mimeType":"image/png"}}],
+"textures":[{{"source":0}},{{"source":1}}],
+"images":[{{"bufferView":4,"mimeType":"image/png"}},{{"bufferView":5,"mimeType":"image/png"}}],
 "accessors":[
  {{"bufferView":0,"componentType":5126,"count":24,"type":"VEC3","min":[-0.5,-0.5,-0.5],"max":[0.5,0.5,0.5]}},
  {{"bufferView":1,"componentType":5126,"count":24,"type":"VEC3"}},

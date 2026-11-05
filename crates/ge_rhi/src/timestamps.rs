@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use tracing::{info, warn};
 
 /// Max passes measured per frame; extra passes run unmeasured.
-const MAX_PASSES: u32 = 32;
+const MAX_PASSES: u32 = 64;
 /// Readback ring depth: frames in flight (2) + one being read.
 const SLOTS: usize = 3;
 
@@ -228,6 +228,29 @@ impl FrameQueries {
             self.spans.push(span);
         }
         Some(wgpu::RenderPassTimestampWrites {
+            query_set: &self.query_set,
+            beginning_of_pass_write_index: Some(index * 2),
+            end_of_pass_write_index: Some(index * 2 + 1),
+        })
+    }
+
+    /// Like [`Self::pass_writes`], for compute passes.
+    pub(crate) fn compute_writes(
+        &mut self,
+        label: &'static str,
+    ) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
+        let index = self.names.len() as u32;
+        if index >= MAX_PASSES {
+            return None;
+        }
+        self.names.push(label);
+        #[cfg(feature = "tracy")]
+        if let Some(ctx) = &self.tracy
+            && let Ok(span) = ctx.span_alloc(label, "compute_pass", file!(), line!())
+        {
+            self.spans.push(span);
+        }
+        Some(wgpu::ComputePassTimestampWrites {
             query_set: &self.query_set,
             beginning_of_pass_write_index: Some(index * 2),
             end_of_pass_write_index: Some(index * 2 + 1),

@@ -13,6 +13,7 @@ tracy = ["ge_engine/tracy"]
 shipping = []
 
 [dependencies]
+ge_core.workspace = true
 ge_engine.workspace = true
 sample.workspace = true
 mimalloc.workspace = true

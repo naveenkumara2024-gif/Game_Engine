@@ -6,14 +6,15 @@ use std::time::{Duration, Instant};
 
 use ge_ecs::prelude::Vec3;
 use ge_platform::{PlatformApp, PlatformContext, PlatformEvent, Window};
-use ge_render::lighting::ViewportShading;
 use ge_render::{FrameInputs, RenderSnapshot, RenderView, Renderer};
 use ge_rhi::{Rhi, Swapchain};
 use ge_shader::ShaderLibrary;
 use tracing::{debug, error, info, info_span, warn};
 
 use crate::input::PlatformEvents;
-use crate::{App, EXIT_WINDOW_CLOSED, EngineStats, R_CLEAR_COLOR, WindowInfo, pacing};
+use crate::{
+    App, EXIT_WINDOW_CLOSED, EngineStats, R_CLEAR_COLOR, WindowInfo, WindowStatus, pacing,
+};
 
 /// Tick period while the window can't present (≈60 Hz keeps simulation alive cheaply).
 const MINIMIZED_TICK: Duration = Duration::from_millis(16);
@@ -31,6 +32,9 @@ pub(crate) struct Engine<'a> {
     frame: u64,
     last_tick: Instant,
     stats: FrameStats,
+    /// The last stats readout and game status shown in the title.
+    title_stats: String,
+    title_status: String,
 }
 
 impl<'a> Engine<'a> {
@@ -42,6 +46,8 @@ impl<'a> Engine<'a> {
             frame: 0,
             last_tick: Instant::now(),
             stats: FrameStats::default(),
+            title_stats: String::new(),
+            title_status: String::new(),
         }
     }
 
@@ -69,29 +75,27 @@ impl<'a> Engine<'a> {
                 }
                 let mut snapshot = world.resource_mut::<RenderSnapshot>();
                 let snapshot = &mut *snapshot;
-                // The world color is the background, color-managed like the scene so Exposure
-                // and the view transform affect it too (Blender does the same).
+                // The world is the background (scene-linear; tonemapping color-manages it
+                // with the rest of the frame, as Blender does).
                 let background = snapshot
                     .world
                     .map_or_else(|| R_CLEAR_COLOR.get(), |w| w.radiance().to_array());
                 let view = RenderView {
                     camera: snapshot.camera.unwrap_or_default(),
                     time: snapshot.time,
-                    clear_color: snapshot.color.apply(background),
+                    clear_color: background,
                 };
-                let rendered = matches!(snapshot.shading, ViewportShading::Rendered);
                 let inputs = FrameInputs {
                     view: &view,
                     items: &snapshot.items,
                     lights: &snapshot.lights,
-                    ambient: if rendered {
-                        snapshot.world.map_or(Vec3::ZERO, |w| w.radiance())
-                    } else {
-                        Vec3::ZERO
-                    },
+                    world: snapshot.world,
+                    ambient: Vec3::ZERO,
                     color: snapshot.color,
+                    look: snapshot.look,
                     shading: snapshot.shading,
                     direct_light: snapshot.direct_light,
+                    bloom: snapshot.bloom,
                     overlays: snapshot.overlays,
                     ui: Some(&mut snapshot.ui),
                     asset_uploads: Some(&mut snapshot.asset_uploads),
@@ -108,9 +112,32 @@ impl<'a> Engine<'a> {
     }
 
     fn update_title(&mut self, dt: Duration) {
-        let (Some(window), Some(avg)) = (&self.window, self.stats.push(dt)) else {
+        let Some(window) = self.window.clone() else {
             return;
         };
+        let mut changed = false;
+        if let Some(status) = self.app.world().get_resource::<WindowStatus>()
+            && status.0 != self.title_status
+        {
+            self.title_status.clone_from(&status.0);
+            changed = true;
+        }
+        if let Some(avg) = self.stats.push(dt) {
+            self.title_stats = self.measure(avg);
+            changed = true;
+        }
+        if changed {
+            let title = &self.app.window.title;
+            window.set_title(&if self.title_status.is_empty() {
+                format!("{title} — {}", self.title_stats)
+            } else {
+                format!("{title} — {} — {}", self.title_status, self.title_stats)
+            });
+        }
+    }
+
+    /// Publishes the averaged frame stats and returns the title-bar readout.
+    fn measure(&mut self, avg: Duration) -> String {
         // GPU time comes from timestamps, not fps: on this laptop presentation is capped by the
         // cross-adapter copy (CLAUDE.md §9).
         let timings = self.gpu.as_ref().and_then(|g| g.rhi.gpu_timings());
@@ -127,12 +154,11 @@ impl<'a> Engine<'a> {
             gpu = ?timings.map(|t| &t.passes),
             "frame stats"
         );
-        window.set_title(&format!(
-            "{} — CPU {:.2} ms | GPU {gpu_ms} | {:.0} fps",
-            self.app.window.title,
+        format!(
+            "CPU {:.2} ms | GPU {gpu_ms} | {:.0} fps",
             avg.as_secs_f64() * 1000.0,
             1.0 / avg.as_secs_f64()
-        ));
+        )
     }
 }
 

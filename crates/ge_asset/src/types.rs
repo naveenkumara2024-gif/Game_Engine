@@ -12,12 +12,56 @@ pub struct Mesh {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
+    /// xyz = tangent, w = bitangent sign (glTF / MikkTSpace convention). From the file when
+    /// it has them, else generated from the UVs at import.
+    pub tangents: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
     pub bounds_min: [f32; 3],
     pub bounds_max: [f32; 3],
 }
 
 impl Mesh {
+    /// Per-vertex tangents from the UVs: accumulated per triangle, orthogonalized against the
+    /// normal, with the bitangent sign in w.
+    pub fn generate_tangents(&mut self) {
+        let n = self.positions.len();
+        let mut tan = vec![glam::Vec3::ZERO; n];
+        let mut bit = vec![glam::Vec3::ZERO; n];
+        for tri in self.indices.chunks_exact(3) {
+            let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+            if a.max(b).max(c) >= n {
+                continue;
+            }
+            let p = |i: usize| glam::Vec3::from(self.positions[i]);
+            let (e1, e2) = (p(b) - p(a), p(c) - p(a));
+            let (ua, ub, uc) = (self.uvs[a], self.uvs[b], self.uvs[c]);
+            let (du1, dv1) = (ub[0] - ua[0], ub[1] - ua[1]);
+            let (du2, dv2) = (uc[0] - ua[0], uc[1] - ua[1]);
+            let det = du1 * dv2 - du2 * dv1;
+            if det.abs() < 1e-12 {
+                continue;
+            }
+            let t = (e1 * dv2 - e2 * dv1) / det;
+            let bt = (e2 * du1 - e1 * du2) / det;
+            for i in [a, b, c] {
+                tan[i] += t;
+                bit[i] += bt;
+            }
+        }
+        self.tangents = (0..n)
+            .map(|i| {
+                let nrm = glam::Vec3::from(self.normals[i]);
+                let t = (tan[i] - nrm * nrm.dot(tan[i])).normalize_or(nrm.any_orthonormal_vector());
+                let w = if nrm.cross(t).dot(bit[i]) < 0.0 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                t.extend(w).to_array()
+            })
+            .collect();
+    }
+
     pub fn vertex_count(&self) -> usize {
         self.positions.len()
     }
@@ -32,6 +76,7 @@ impl Mesh {
         let n = self.positions.len();
         self.normals.len() == n
             && self.uvs.len() == n
+            && self.tangents.len() == n
             && self.indices.len().is_multiple_of(3)
             && self.indices.iter().all(|&i| (i as usize) < n)
     }
@@ -67,11 +112,13 @@ pub enum PixelFormat {
     Bc5,
     Bc7,
     Bc7Srgb,
+    /// Half-float RGBA (HDR environment maps).
+    Rgba16Float,
 }
 
 impl PixelFormat {
     pub fn is_compressed(self) -> bool {
-        !matches!(self, Self::Rgba8 | Self::Rgba8Srgb)
+        !matches!(self, Self::Rgba8 | Self::Rgba8Srgb | Self::Rgba16Float)
     }
 
     pub fn is_srgb(self) -> bool {
@@ -86,6 +133,7 @@ impl PixelFormat {
         let blocks = || (width.div_ceil(4).max(1) * height.div_ceil(4).max(1)) as usize;
         match self {
             Self::Rgba8 | Self::Rgba8Srgb => (width * height * 4) as usize,
+            Self::Rgba16Float => (width * height * 8) as usize,
             Self::Bc1 | Self::Bc1Srgb | Self::Bc4 => blocks() * 8,
             Self::Bc3 | Self::Bc3Srgb | Self::Bc5 | Self::Bc7 | Self::Bc7Srgb => blocks() * 16,
         }

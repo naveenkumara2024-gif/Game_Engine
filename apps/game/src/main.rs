@@ -16,9 +16,12 @@ pub static NvOptimusEnablement: u32 = 1;
 pub static AmdPowerXpressRequestHighPerformance: i32 = 1;
 
 fn main() -> anyhow::Result<()> {
+    // The game is played in Rendered shading (scene lights, shadows, bloom). Set before
+    // `run`, so `-cvar r.ViewportShading=0` on the command line still wins.
+    ge_core::cvar::set("r.ViewportShading", "1", ge_core::cvar::SetBy::Code)?;
     App::new()
         .set_window(WindowDesc {
-            title: "Game_Engine — Arena".into(),
+            title: "Orb Run".into(),
             ..Default::default()
         })
         .add_plugins(DefaultPlugins)

@@ -191,6 +191,7 @@ impl UiRenderer {
                 address: AddressMode::ClampToEdge,
                 mipmaps: false,
                 anisotropy: 1,
+                compare: None,
             })
         };
         let linear_sampler = sampler("UiLinear", FilterMode::Linear);
@@ -264,13 +265,14 @@ impl UiRenderer {
                     label: "Ui",
                     shader: &module,
                     vertex_entry: "vs_main",
-                    fragment_entry: "fs_main",
+                    fragment_entry: Some("fs_main"),
                     vertex_layouts: &[UiVertex::LAYOUT],
                     bind_group_layouts: &[&self.screen_layout, &self.texture_layout],
                     color_formats: &[self.color_format],
                     depth: None,
                     cull_mode: CullMode::None,
                     blend: Some(BlendMode::PremultipliedAlpha),
+                    depth_bias: None,
                 })
                 .map_err(|e| e.to_string())
             });

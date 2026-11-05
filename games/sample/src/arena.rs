@@ -6,6 +6,12 @@ use ge_engine::prelude::*;
 /// Half-size of the walkable floor.
 pub const ARENA_HALF_SIZE: f32 = 15.0;
 
+ge_core::declare_cvar!(pub static SAMPLE_STRESS_LIGHTS: u32 = (
+    "sample.StressLights",
+    0,
+    "Extra small point lights scattered over the arena at startup (M4 performance gate: 256)"
+));
+
 /// Rotates the entity around a local axis at a constant rate (visual only).
 #[derive(Component, Copy, Clone, Debug)]
 pub struct Spin {
@@ -43,6 +49,64 @@ pub fn spawn_arena(mut commands: Commands, assets: Option<ResMut<AssetServer>>) 
             ..Light::new(LightKind::Sun)
         },
     ));
+
+    // Shadowed local lights (plan 0006): a warm spot on the crate, a cool spot on the cube
+    // cluster and a point light in the middle of the arena.
+    commands.spawn((
+        Name::new("Spot.Crate"),
+        Transform::from_xyz(8.0, 6.0, -0.5).looking_at(Vec3::new(4.0, 0.0, -3.0), Vec3::Y),
+        Light {
+            power: 1500.0,
+            color: Vec3::new(1.0, 0.78, 0.55),
+            spot_size: 50f32.to_radians(),
+            spot_blend: 0.3,
+            radius: 0.2,
+            ..Light::new(LightKind::Spot)
+        },
+    ));
+    commands.spawn((
+        Name::new("Spot.Cluster"),
+        Transform::from_xyz(-3.0, 7.0, -3.0).looking_at(Vec3::new(-7.0, 0.0, -7.0), Vec3::Y),
+        Light {
+            power: 2000.0,
+            color: Vec3::new(0.55, 0.7, 1.0),
+            spot_size: 55f32.to_radians(),
+            spot_blend: 0.25,
+            radius: 0.2,
+            ..Light::new(LightKind::Spot)
+        },
+    ));
+    commands.spawn((
+        Name::new("Point.Center"),
+        Transform::from_xyz(0.0, 3.0, 4.0),
+        Light {
+            power: 600.0,
+            color: Vec3::new(1.0, 0.9, 0.8),
+            radius: 0.15,
+            ..Light::new(LightKind::Point)
+        },
+    ));
+
+    // `-cvar sample.StressLights=N`: unshadowed lights on a golden-angle spiral, for
+    // measuring clustered shading.
+    let stress = SAMPLE_STRESS_LIGHTS.get();
+    for i in 0..stress {
+        let t = (i as f32 + 0.5) / stress as f32;
+        let r = t.sqrt() * (ARENA_HALF_SIZE - 1.0);
+        let a = i as f32 * 2.399_963;
+        commands.spawn((
+            Name::new(format!("Stress.{:03}", i + 1)),
+            Transform::from_xyz(a.cos() * r, 0.6 + (i % 4) as f32 * 0.4, a.sin() * r),
+            Light {
+                power: 40.0,
+                color: Vec3::from(palette(i as f32 * 0.137 % 1.0)),
+                cast_shadow: false,
+                use_custom_distance: true,
+                custom_distance: 3.0,
+                ..Light::new(LightKind::Point)
+            },
+        ));
+    }
 
     let pillars = 10;
     for i in 0..pillars {

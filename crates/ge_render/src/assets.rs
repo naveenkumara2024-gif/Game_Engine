@@ -36,6 +36,7 @@ fn gpu_format(f: PixelFormat) -> TextureFormat {
         PixelFormat::Bc5 => TextureFormat::Bc5RgUnorm,
         PixelFormat::Bc7 => TextureFormat::Bc7RgbaUnorm,
         PixelFormat::Bc7Srgb => TextureFormat::Bc7RgbaUnormSrgb,
+        PixelFormat::Rgba16Float => TextureFormat::Rgba16Float,
     }
 }
 
@@ -44,9 +45,14 @@ pub(crate) struct GpuAssets {
     sampler: Sampler,
     white_srgb: GpuTexture,
     white_linear: GpuTexture,
+    /// (0.5, 0.5, 1) — "no normal map".
+    flat_normal: GpuTexture,
     default_group: BindGroup,
     meshes: HashMap<AssetId<Mesh>, GpuMesh>,
     textures: HashMap<AssetId<Texture>, GpuTexture>,
+    /// Bumped on every texture upload (environment maps rebuild when it changes).
+    texture_versions: HashMap<AssetId<Texture>, u64>,
+    upload_counter: u64,
     materials: HashMap<AssetId<MaterialAsset>, (Arc<MaterialAsset>, BindGroup)>,
 }
 
@@ -78,6 +84,8 @@ impl GpuAssets {
                     visibility: ShaderStages::Fragment,
                     ty: BindingType::Sampler,
                 },
+                tex(4),
+                tex(5),
             ],
         );
         let sampler = rhi.create_sampler(&SamplerDesc {
@@ -86,23 +94,35 @@ impl GpuAssets {
             address: AddressMode::Repeat,
             mipmaps: true,
             anisotropy: 8,
+            compare: None,
         });
-        let white = |label, format| {
+        let solid = |label, format, px: [u8; 4]| {
             let t = rhi.create_texture(&TextureDesc {
                 label,
                 size: (1, 1),
                 format,
                 usage: TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
             });
-            rhi.write_texture(&t, (0, 0), (1, 1), &[255; 4]);
+            rhi.write_texture(&t, (0, 0), (1, 1), &px);
             t
         };
-        let white_srgb = white("WhiteSrgb", TextureFormat::Rgba8UnormSrgb);
-        let white_linear = white("WhiteLinear", TextureFormat::Rgba8Unorm);
+        let white_srgb = solid("WhiteSrgb", TextureFormat::Rgba8UnormSrgb, [255; 4]);
+        let white_linear = solid("WhiteLinear", TextureFormat::Rgba8Unorm, [255; 4]);
+        let flat_normal = solid(
+            "FlatNormal",
+            TextureFormat::Rgba8Unorm,
+            [128, 128, 255, 255],
+        );
         let default_group = Self::group(
             rhi,
             &layout,
-            [&white_srgb, &white_linear, &white_srgb],
+            [
+                &white_srgb,
+                &white_linear,
+                &white_srgb,
+                &flat_normal,
+                &white_linear,
+            ],
             &sampler,
         );
         Self {
@@ -110,9 +130,12 @@ impl GpuAssets {
             sampler,
             white_srgb,
             white_linear,
+            flat_normal,
             default_group,
             meshes: HashMap::new(),
             textures: HashMap::new(),
+            texture_versions: HashMap::new(),
+            upload_counter: 0,
             materials: HashMap::new(),
         }
     }
@@ -120,7 +143,7 @@ impl GpuAssets {
     fn group(
         rhi: &Rhi,
         layout: &BindGroupLayout,
-        textures: [&GpuTexture; 3],
+        textures: [&GpuTexture; 5],
         sampler: &Sampler,
     ) -> BindGroup {
         rhi.create_bind_group(
@@ -142,6 +165,14 @@ impl GpuAssets {
                 BindGroupEntry {
                     binding: 3,
                     resource: BindingResource::Sampler(sampler),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: BindingResource::Texture(textures[3]),
+                },
+                BindGroupEntry {
+                    binding: 5,
+                    resource: BindingResource::Texture(textures[4]),
                 },
             ],
         )
@@ -165,6 +196,7 @@ impl GpuAssets {
                                 normal: mesh.normals[i],
                                 color: [1.0; 3],
                                 uv: mesh.uvs[i],
+                                tangent: mesh.tangents[i],
                             })
                             .collect(),
                         indices: mesh.indices.clone(),
@@ -179,6 +211,8 @@ impl GpuAssets {
                 AssetUpload::Texture(id, texture) => {
                     if let Some(t) = self.upload_texture(rhi, &texture) {
                         self.textures.insert(id, t);
+                        self.upload_counter += 1;
+                        self.texture_versions.insert(id, self.upload_counter);
                         textures_changed = true;
                     }
                 }
@@ -215,7 +249,14 @@ impl GpuAssets {
             let base = pick(&material.base_color_texture, &self.white_srgb);
             let mr = pick(&material.metallic_roughness_texture, &self.white_linear);
             let emissive = pick(&material.emissive_texture, &self.white_srgb);
-            let group = Self::group(rhi, &self.layout, [&base, &mr, &emissive], &self.sampler);
+            let normal = pick(&material.normal_texture, &self.flat_normal);
+            let occlusion = pick(&material.occlusion_texture, &self.white_linear);
+            let group = Self::group(
+                rhi,
+                &self.layout,
+                [&base, &mr, &emissive, &normal, &occlusion],
+                &self.sampler,
+            );
             self.materials.insert(id, (material, group));
         }
         debug!(
@@ -251,6 +292,14 @@ impl GpuAssets {
             }
         }
         Some(gpu)
+    }
+
+    pub(crate) fn texture(&self, id: AssetId<Texture>) -> Option<&GpuTexture> {
+        self.textures.get(&id)
+    }
+
+    pub(crate) fn texture_version(&self, id: AssetId<Texture>) -> u64 {
+        self.texture_versions.get(&id).copied().unwrap_or(0)
     }
 
     pub(crate) fn mesh(&self, id: AssetId<Mesh>) -> Option<&GpuMesh> {

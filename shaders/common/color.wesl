@@ -78,6 +78,16 @@ fn color_manage(view: View, scene: vec3<f32>) -> vec3<f32> {
     } else {
         c = clamp(c, vec3(0.0), vec3(1.0));
     }
+    // Look: an S-curve on display-encoded values (our own; Blender's looks are OCIO LUTs).
+    let look = view.params.z;
+    if look > 0.5 {
+        let k = 1.0 + 0.22 * look;
+        var e = vec3(linear_to_srgb(c.x), linear_to_srgb(c.y), linear_to_srgb(c.z));
+        e = clamp(e, vec3(0.0), vec3(1.0));
+        let up = pow(e, vec3(k));
+        e = up / (up + pow(vec3(1.0) - e, vec3(k)));
+        c = vec3(srgb_to_linear(e.x), srgb_to_linear(e.y), srgb_to_linear(e.z));
+    }
     let gamma = view.color_management.y;
     if gamma != 1.0 {
         let g = 1.0 / gamma;

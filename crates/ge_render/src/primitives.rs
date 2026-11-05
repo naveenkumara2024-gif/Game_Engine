@@ -253,6 +253,7 @@ impl Primitive {
         if !smooth {
             mesh = unweld_flat(&mesh);
         }
+        mesh.generate_tangents();
         mesh
     }
 }
@@ -333,6 +334,7 @@ fn vertex(p: Vec3, n: Vec3, uv: [f32; 2]) -> Vertex {
         normal: n.normalize_or_zero().to_array(),
         color: WHITE,
         uv,
+        tangent: [1.0, 0.0, 0.0, 1.0],
     }
 }
 

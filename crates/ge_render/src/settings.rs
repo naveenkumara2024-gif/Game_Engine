@@ -191,7 +191,7 @@ const fn advanced(mut p: Panel) -> Panel {
 
 const RES: &[&str] = &["1:1", "1:2", "1:4", "1:8", "1:16"];
 const TAA: (&str, &str) = ("M12", "temporal anti-aliasing (TAA)");
-const SHADOWS: (&str, &str) = ("M4", "cascaded + atlas shadow maps");
+const SHADOWS: (&str, &str) = ("M12", "virtual shadow maps with temporal jitter");
 const RAYTRACE: (&str, &str) = ("M12", "screen-space reflections and GI");
 const POST: (&str, &str) = ("M12", "post-processing stack");
 const VOLUMES: (&str, &str) = ("T3", "volumetrics (after M12)");
@@ -261,14 +261,14 @@ pub const RENDER_PANELS: &[Panel] = &[
         "Advanced",
         Some("eevee.sampling"),
         "Fine control over how lights are sampled.",
-        &[planned(
+        &[live(
             "eevee.sampling.advanced.light_threshold",
             "Light Threshold",
-            f(0.0, 1.0, 0.01, Unit::None),
-            "M4",
-            "light culling by influence radius",
+            f(0.0001, 1.0, 0.01, Unit::None),
+            "r.LightThreshold",
             "Below this brightness a light's influence is treated as zero. It decides how far \
-             each light reaches, which keeps lights cheap to cull.",
+             each light reaches (its range), which is what lets thousands of lights be culled \
+             into screen clusters. Lower = lights reach farther and cost more.",
         )],
     )),
     toggled(
@@ -312,23 +312,22 @@ pub const RENDER_PANELS: &[Panel] = &[
                     VOLUMES.1,
                     "Samples taken through a volume when computing its shadow.",
                 ),
-                planned(
+                live(
                     "eevee.shadows.resolution",
                     "Resolution",
-                    f(0.0, 1.0, 1.0, Unit::Percent),
-                    SHADOWS.0,
-                    SHADOWS.1,
-                    "Scales the resolution of every shadow map. Lower is faster and blurrier.",
+                    f(0.125, 2.0, 1.0, Unit::None),
+                    "r.Shadow.Resolution",
+                    "Scales the resolution of the sun's shadow cascades (1 = 2048² each). Lower \
+                     is faster and blurrier; 2 is sharper and uses 4× the memory.",
                 ),
             ],
         ),
-        planned(
+        live(
             "eevee.shadows.enabled",
             "Shadows",
             Kind::Bool(true),
-            SHADOWS.0,
-            SHADOWS.1,
-            "Turn all shadows on or off.",
+            "r.Shadows",
+            "Turn all shadows on or off (lights still shine, nothing blocks them).",
         ),
     ),
     panel(
@@ -872,6 +871,45 @@ pub const RENDER_PANELS: &[Panel] = &[
             ),
         ],
     ),
+    panel(
+        "engine.bloom",
+        "Bloom (engine)",
+        None,
+        "Not in EEVEE 5.x: Blender moved bloom to the compositor's Glare node. Ours is the \
+         real-time dual-filter bloom game engines use: bright parts of the image bleed light \
+         into their surroundings, like a camera lens.",
+        &[
+            live(
+                "engine.bloom.intensity",
+                "Intensity",
+                f(0.0, 1.0, 0.04, Unit::None),
+                "r.Bloom.Intensity",
+                "How much glow is added. 0 turns bloom off.",
+            ),
+            live(
+                "engine.bloom.threshold",
+                "Threshold",
+                f(0.0, 20.0, 1.0, Unit::None),
+                "r.Bloom.Threshold",
+                "Scene brightness where glow starts. 1 = brighter than white; lower makes more \
+                 of the image glow.",
+            ),
+            live(
+                "engine.bloom.knee",
+                "Knee",
+                f(0.0, 5.0, 0.5, Unit::None),
+                "r.Bloom.Knee",
+                "How softly glow fades in below the threshold.",
+            ),
+            live(
+                "engine.bloom.radius",
+                "Radius",
+                f(0.1, 4.0, 1.0, Unit::None),
+                "r.Bloom.Radius",
+                "How far the glow spreads.",
+            ),
+        ],
+    ),
     advanced(panel(
         "eevee.performance",
         "Performance",
@@ -894,14 +932,13 @@ pub const RENDER_PANELS: &[Panel] = &[
                 "textures and samplers",
                 "Keeps textures sharp on surfaces seen at a grazing angle (floors, roads).",
             ),
-            planned(
+            live(
                 "eevee.performance.shadow_pool",
                 "Shadow Pool",
-                i(16, 4096, 512),
-                SHADOWS.0,
-                SHADOWS.1,
-                "GPU memory (MB) reserved for shadow map pages. Too small and distant shadows \
-                 lose resolution.",
+                i(4, 1024, 64),
+                "r.Shadow.Pool",
+                "GPU memory (MB) for the spot/point/area shadow atlas. 64 MB = a 4096² atlas \
+                 with 512² tiles. Smaller saves VRAM, blurrier local shadows.",
             ),
             planned(
                 "eevee.performance.probe_pool",
@@ -952,18 +989,25 @@ pub const RENDER_PANELS: &[Panel] = &[
                 "How scene brightness (which has no upper limit) is squeezed into 0–1. Standard \
                  clips anything above 1 to flat white. AgX rolls highlights off smoothly and \
                  desaturates them, like film (Blender's default). PBR Neutral keeps material \
-                 colors truest. (Our AgX is an AgX-style curve; the exact LUT arrives at M4.)",
+                 colors truest. (Our AgX is our own AgX-style curve, not Blender's OCIO LUT.)",
             ),
-            planned(
+            live(
                 "color.look",
                 "Look",
                 Kind::Enum(
-                    &["None", "Punchy", "Base Contrast", "Very High Contrast"],
+                    &[
+                        "None",
+                        "Punchy",
+                        "Base Contrast",
+                        "High Contrast",
+                        "Very High Contrast",
+                    ],
                     0,
                 ),
-                "M4",
-                "HDR post pass with LUTs",
-                "An artistic contrast preset applied on top of the view transform.",
+                "r.Look",
+                "An artistic contrast preset applied after the view transform: an S-curve that \
+                 deepens shadows and brightens highlights. Ours are our own curves, not \
+                 Blender's LUTs.",
             ),
             live(
                 "color.exposure",
@@ -1063,20 +1107,6 @@ pub const WORLD_PANELS: &[Panel] = &[
         )],
     ),
     panel(
-        "world.light_probe",
-        "Light Probe",
-        None,
-        "The world is captured into a probe for reflections and image-based lighting.",
-        &[planned(
-            "world.probe.resolution",
-            "Resolution",
-            Kind::Enum(&["128", "256", "512", "1024", "2048"], 3),
-            "M4",
-            "image-based lighting (IBL)",
-            "Resolution of the captured world probe. Higher = sharper reflections of the sky.",
-        )],
-    ),
-    panel(
         "world.sun",
         "Sun",
         None,
@@ -1116,55 +1146,38 @@ pub const WORLD_PANELS: &[Panel] = &[
 ];
 
 /// Light tab rows that aren't live yet.
-pub const LIGHT_PANELS: &[Panel] = &[toggled(
-    panel(
-        "light.shadow",
-        "Shadow",
-        None,
-        "Per-light shadow settings.",
-        &[
-            planned(
-                "light.shadow.jitter",
-                "Jitter",
-                Kind::Bool(false),
-                SHADOWS.0,
-                SHADOWS.1,
-                "Randomize the shadow origin each sample for accurate soft shadows.",
-            ),
-            planned(
-                "light.shadow.overblur",
-                "Overblur",
-                f(0.0, 1.0, 0.2, Unit::None),
-                SHADOWS.0,
-                SHADOWS.1,
-                "Extra blur to hide jitter noise with few samples.",
-            ),
-            planned(
-                "light.shadow.filter",
-                "Filter",
-                f(0.0, 10.0, 1.0, Unit::None),
-                SHADOWS.0,
-                SHADOWS.1,
-                "Blur the shadow edge to hide shadow-map pixels.",
-            ),
-            planned(
-                "light.shadow.resolution_limit",
-                "Resolution Limit",
-                f(0.0, 100.0, 0.001, Unit::Meters),
-                SHADOWS.0,
-                SHADOWS.1,
-                "Smallest shadow-map texel size in world units (or relative to distance).",
-            ),
-        ],
-    ),
-    planned(
-        "light.shadow.enabled",
-        "Shadow",
-        Kind::Bool(true),
-        SHADOWS.0,
-        SHADOWS.1,
-        "Whether this light casts shadows.",
-    ),
+pub const LIGHT_PANELS: &[Panel] = &[panel(
+    "light.shadow_planned",
+    "Shadow (planned)",
+    None,
+    "EEVEE's per-light soft-shadow controls. They need virtual shadow maps with temporal \
+     jitter (M12); Shadow on/off and Filter are live in the panel above.",
+    &[
+        planned(
+            "light.shadow.jitter",
+            "Jitter",
+            Kind::Bool(false),
+            SHADOWS.0,
+            SHADOWS.1,
+            "Randomize the shadow origin each sample for accurate soft shadows.",
+        ),
+        planned(
+            "light.shadow.overblur",
+            "Overblur",
+            f(0.0, 1.0, 0.2, Unit::None),
+            SHADOWS.0,
+            SHADOWS.1,
+            "Extra blur to hide jitter noise with few samples.",
+        ),
+        planned(
+            "light.shadow.resolution_limit",
+            "Resolution Limit",
+            f(0.0, 100.0, 0.001, Unit::Meters),
+            SHADOWS.0,
+            SHADOWS.1,
+            "Smallest shadow-map texel size in world units (or relative to distance).",
+        ),
+    ],
 )];
 
 /// Material tab rows that aren't live yet.
@@ -1176,23 +1189,6 @@ pub const MATERIAL_PANELS: &[Panel] = &[
         "The rest of the Principled BSDF. Each one adds a physical layer to the surface.",
         &[
             planned(
-                "material.alpha",
-                "Alpha",
-                f(0.0, 1.0, 1.0, Unit::None),
-                "M4",
-                "transparency (dithered + blended)",
-                "Opacity. 0 is fully see-through.",
-            ),
-            planned(
-                "material.ior",
-                "IOR",
-                f(1.0, 4.0, 1.5, Unit::None),
-                "M12",
-                "refraction",
-                "Index of refraction: how much light bends entering the material (glass ≈ 1.5, \
-                 water ≈ 1.33). Also sets how reflective a dielectric is head-on.",
-            ),
-            planned(
                 "material.subsurface",
                 "Subsurface Weight",
                 f(0.0, 1.0, 0.0, Unit::None),
@@ -1200,14 +1196,6 @@ pub const MATERIAL_PANELS: &[Panel] = &[
                 "subsurface scattering",
                 "Light entering the surface, scattering inside and leaving elsewhere (skin, wax, \
                  marble).",
-            ),
-            planned(
-                "material.specular_ior_level",
-                "Specular IOR Level",
-                f(0.0, 1.0, 0.5, Unit::None),
-                "M4",
-                "full PBR",
-                "Artistic tweak of reflection strength; 0.5 keeps the physical IOR.",
             ),
             planned(
                 "material.transmission",
@@ -1249,31 +1237,6 @@ pub const MATERIAL_PANELS: &[Panel] = &[
         None,
         "Render settings of the material.",
         &[
-            planned(
-                "material.render_method",
-                "Render Method",
-                Kind::Enum(&["Dithered", "Blended"], 0),
-                "M4",
-                "transparency (dithered + blended)",
-                "Dithered: transparency as a stochastic pattern, sorted correctly. Blended: \
-                 classic alpha blending, needs sorting.",
-            ),
-            planned(
-                "material.backface_culling_shadow",
-                "Backface Culling (Shadow)",
-                Kind::Bool(false),
-                SHADOWS.0,
-                SHADOWS.1,
-                "Don't let back faces cast shadows.",
-            ),
-            planned(
-                "material.transparent_shadows",
-                "Transparent Shadows",
-                Kind::Bool(false),
-                SHADOWS.0,
-                SHADOWS.1,
-                "Shadows respect the material's alpha.",
-            ),
             planned(
                 "material.displacement",
                 "Displacement",
@@ -1405,6 +1368,7 @@ mod tests {
                 "Depth of Field",
                 "Motion Blur",
                 "Film",
+                "Bloom (engine)",
                 "Performance",
                 "Color Management"
             ]

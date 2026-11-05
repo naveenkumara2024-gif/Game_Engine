@@ -6,7 +6,7 @@
 use std::ops::Range;
 
 use crate::timestamps::FrameQueries;
-use crate::{BindGroup, Buffer, ClearColor, RenderPipeline, Texture};
+use crate::{BindGroup, Buffer, ClearColor, RenderPipeline, Texture, TextureView};
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum LoadOp<T> {
@@ -29,6 +29,29 @@ pub struct RenderPassDesc<'a> {
     /// Writes the frame's color target; `None` for depth-only passes.
     pub color: Option<LoadOp<ClearColor>>,
     pub depth: Option<DepthAttachment<'a>>,
+}
+
+/// A color attachment of a [`TargetPassDesc`].
+#[derive(Copy, Clone, Debug)]
+pub struct ColorTarget<'a> {
+    pub view: &'a TextureView,
+    pub load: LoadOp<ClearColor>,
+}
+
+/// A depth attachment of a [`TargetPassDesc`].
+#[derive(Copy, Clone, Debug)]
+pub struct DepthTarget<'a> {
+    pub view: &'a TextureView,
+    pub load: LoadOp<f32>,
+    pub store: bool,
+}
+
+/// A pass drawing into arbitrary targets (offscreen HDR color, shadow map layers, mips).
+#[derive(Copy, Clone, Debug)]
+pub struct TargetPassDesc<'a> {
+    pub label: &'static str,
+    pub color: &'a [ColorTarget<'a>],
+    pub depth: Option<DepthTarget<'a>>,
 }
 
 /// A pass being recorded into a [`crate::Frame`]. Ends when dropped.
@@ -70,6 +93,11 @@ impl RenderPass<'_> {
 
     pub fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
         self.inner.draw(vertices, instances);
+    }
+
+    /// Maps clip space to a sub-rectangle of the target (shadow atlas tiles), in pixels.
+    pub fn set_viewport(&mut self, x: f32, y: f32, width: f32, height: f32) {
+        self.inner.set_viewport(x, y, width, height, 0.0, 1.0);
     }
 
     /// Restricts drawing to a rectangle of the target, in pixels from the top-left. The

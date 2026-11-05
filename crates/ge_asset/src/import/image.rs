@@ -29,6 +29,63 @@ pub fn decode(bytes: &[u8], srgb: bool, generate_mips: bool) -> Result<Texture, 
     ))
 }
 
+/// Radiance `.hdr` → one level of half-float RGBA (environment maps need no mips: IBL builds
+/// its own filtered cube).
+pub fn decode_hdr(bytes: &[u8]) -> Result<Texture, AssetError> {
+    let img = image::load_from_memory_with_format(bytes, image::ImageFormat::Hdr)
+        .map_err(|e| AssetError::Import(format!("HDR decode: {e}")))?
+        .to_rgba32f();
+    let (width, height) = img.dimensions();
+    if width == 0 || height == 0 || width > MAX_SIDE * 2 || height > MAX_SIDE {
+        return Err(AssetError::Import(format!(
+            "HDR image is {width}x{height}; too large"
+        )));
+    }
+    let mut data = Vec::with_capacity((width * height * 8) as usize);
+    for px in img.pixels() {
+        for (i, &c) in px.0.iter().enumerate() {
+            let v = if i == 3 { 1.0 } else { c.max(0.0) };
+            data.extend_from_slice(&f32_to_f16(v).to_le_bytes());
+        }
+    }
+    Ok(Texture {
+        format: PixelFormat::Rgba16Float,
+        width,
+        height,
+        mips: vec![data],
+    })
+}
+
+/// IEEE-754 binary16 from f32 (round to nearest even; overflow → infinity, NaN kept).
+pub fn f32_to_f16(v: f32) -> u16 {
+    let bits = v.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xff) as i32;
+    let mant = bits & 0x007f_ffff;
+    if exp == 0xff {
+        return sign | 0x7c00 | if mant != 0 { 0x200 } else { 0 };
+    }
+    let e = exp - 127 + 15;
+    if e >= 0x1f {
+        return sign | 0x7c00;
+    }
+    if e <= 0 {
+        if e < -10 {
+            return sign;
+        }
+        let m = (mant | 0x0080_0000) >> (1 - e);
+        let round = (m >> 12) & 1;
+        return sign | ((m >> 13) + round) as u16;
+    }
+    let m = mant >> 13;
+    let round = (mant >> 12) & 1;
+    let mut out = (sign as u32) | ((e as u32) << 10) | m;
+    if round == 1 && ((mant & 0xfff) != 0 || (m & 1) == 1) {
+        out += 1;
+    }
+    out as u16
+}
+
 pub fn from_rgba8(
     width: u32,
     height: u32,
@@ -142,6 +199,32 @@ mod tests {
         let data = from_rgba8(2, 2, px.to_vec(), false, true);
         assert_eq!(data.mips[1][0], 128);
         assert_eq!(srgb.mips[1][3], 255, "alpha stays linear");
+    }
+
+    #[test]
+    fn half_floats() {
+        assert_eq!(f32_to_f16(1.0), 0x3c00);
+        assert_eq!(f32_to_f16(0.5), 0x3800);
+        assert_eq!(f32_to_f16(65504.0), 0x7bff);
+        assert_eq!(f32_to_f16(1.0e6), 0x7c00);
+        assert_eq!(f32_to_f16(0.0), 0);
+        assert_eq!(f32_to_f16(-2.0), 0xc000);
+    }
+
+    #[test]
+    fn decodes_hdr() {
+        let mut hdr = Vec::new();
+        let img = image::Rgb32FImage::from_pixel(4, 2, image::Rgb([2.0, 0.5, 8.0]));
+        image::DynamicImage::ImageRgb32F(img)
+            .write_to(&mut std::io::Cursor::new(&mut hdr), image::ImageFormat::Hdr)
+            .unwrap();
+        let t = decode_hdr(&hdr).unwrap();
+        assert_eq!(
+            (t.format, t.width, t.height),
+            (PixelFormat::Rgba16Float, 4, 2)
+        );
+        assert_eq!(&t.mips[0][..6], &[0x00, 0x40, 0x00, 0x38, 0x00, 0x48]);
+        assert!(t.is_valid());
     }
 
     #[test]

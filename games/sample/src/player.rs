@@ -7,7 +7,7 @@ use crate::actions;
 use crate::arena::{ARENA_HALF_SIZE, Spin};
 use crate::camera::OrbitCamera;
 
-const START: Vec3 = Vec3::new(0.0, 0.5, 0.0);
+pub const START: Vec3 = Vec3::new(0.0, 0.5, 0.0);
 
 #[derive(Component, Copy, Clone, Debug)]
 pub struct Player {
@@ -16,6 +16,10 @@ pub struct Player {
     /// Yaw the body faces (radians); turns toward the movement direction.
     pub facing: f32,
 }
+
+/// Every mesh of the player's body (the hit blink toggles their [`Visibility`]).
+#[derive(Component, Copy, Clone, Debug, Default)]
+pub struct PlayerPart;
 
 /// Fixed-step position history used for render interpolation.
 #[derive(Component, Copy, Clone, Debug, Default)]
@@ -38,6 +42,8 @@ pub fn spawn_player(mut commands: Commands) {
             },
             Transform::from_translation(START),
             MeshRenderer::new(MeshKind::Cube, [1.0, 0.55, 0.15]),
+            PlayerPart,
+            Visibility::default(),
         ))
         .with_children(|body| {
             // Shoulders follow the body; the "antenna" on the right one also spins.
@@ -45,17 +51,23 @@ pub fn spawn_player(mut commands: Commands) {
                 Name::new("Shoulder.L"),
                 Transform::from_xyz(-0.7, 0.3, 0.0).with_scale(Vec3::splat(0.4)),
                 MeshRenderer::new(MeshKind::Cube, [0.9, 0.9, 0.9]),
+                PlayerPart,
+                Visibility::default(),
             ));
             body.spawn((
                 Name::new("Shoulder.R"),
                 Transform::from_xyz(0.7, 0.3, 0.0).with_scale(Vec3::splat(0.4)),
                 MeshRenderer::new(MeshKind::Cube, [0.9, 0.9, 0.9]),
+                PlayerPart,
+                Visibility::default(),
             ))
             .with_children(|shoulder| {
                 shoulder.spawn((
                     Name::new("Antenna"),
                     Transform::from_xyz(0.0, 1.6, 0.0).with_scale(Vec3::splat(0.6)),
                     MeshRenderer::new(MeshKind::Cube, [0.2, 0.9, 1.0]),
+                    PlayerPart,
+                    Visibility::default(),
                     Spin {
                         axis: Vec3::Y,
                         speed: 4.0,
@@ -74,10 +86,16 @@ pub fn camera_basis(yaw: f32) -> (Vec3, Vec3) {
 pub fn move_player(
     actions: Res<ActionState>,
     fixed: Res<FixedTime>,
+    round: Option<Res<crate::game::Round>>,
     camera: Query<&OrbitCamera>,
     mut players: Query<(&mut Player, &mut FixedMotion)>,
 ) {
-    let input = actions.axis2d(actions::MOVE);
+    // Frozen once the run is over (the camera still orbits).
+    let input = if round.is_none_or(|r| r.playing()) {
+        actions.axis2d(actions::MOVE)
+    } else {
+        Vec2::ZERO
+    };
     let yaw = camera.iter().next().map_or(0.0, |c| c.yaw);
     let (forward, right) = camera_basis(yaw);
     let direction = forward * input.y + right * input.x;

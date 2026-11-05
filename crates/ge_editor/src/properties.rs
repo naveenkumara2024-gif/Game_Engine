@@ -151,24 +151,68 @@ fn shading_hint(ui: &mut egui::Ui) {
 }
 
 fn world_tab(ui: &mut egui::Ui, world: &mut World, ed: &mut Editor) {
+    use ge_render::WorldSurface;
     heading(ui, icon::GLOBE, "World");
     shading_hint(ui);
     legend(ui, ed);
     if !world.contains_resource::<WorldSettings>() {
         world.init_resource::<WorldSettings>();
     }
+    let surface = world.resource::<WorldSettings>().surface;
     section(ui, "world.surface", "Surface", true, |ui| {
-        row(ui, "Color", |ui| {
-            edit_resource::<WorldSettings, _>(ui, world, ed, "World Color", |ui, w| {
-                color_linear(ui, &mut w.color)
+        row(ui, "Surface", |ui| {
+            edit_resource::<WorldSettings, _>(ui, world, ed, "World Surface", |ui, w| {
+                let a = ui.selectable_value(&mut w.surface, WorldSurface::Color, "Color");
+                let b = ui.selectable_value(&mut w.surface, WorldSurface::Sky, "Sky");
+                let c = ui.selectable_value(&mut w.surface, WorldSurface::Hdri, "HDRI");
+                a.union(b).union(c)
             })
         })
         .map(|r| {
             r.on_hover_text(
-                "The world's color: the background, and (in Rendered shading) light arriving \
-                 from every direction. A darker world makes your lamps stand out.",
+                "Where the world's light comes from. Color: one color from every direction. \
+                 Sky: our procedural daylight sky, lit by the scene's Sun. HDRI: a 360° photo \
+                 (.hdr) of a real place. All three light the scene (diffuse + reflections) \
+                 through image-based lighting.",
             )
         });
+        let color_label = if surface == WorldSurface::Sky {
+            "Tint"
+        } else {
+            "Color"
+        };
+        if surface != WorldSurface::Hdri {
+            row(ui, color_label, |ui| {
+                edit_resource::<WorldSettings, _>(ui, world, ed, "World Color", |ui, w| {
+                    color_linear(ui, &mut w.color)
+                })
+            })
+            .map(|r| {
+                r.on_hover_text(if surface == WorldSurface::Sky {
+                    "Tints the sky's blue (white = neutral)."
+                } else {
+                    "The world's color: the background and light arriving from every \
+                     direction. A darker world makes your lamps stand out."
+                })
+            });
+        }
+        if surface == WorldSurface::Hdri {
+            hdri_picker(ui, world, ed);
+            row(ui, "Rotation", |ui| {
+                edit_resource::<WorldSettings, _>(ui, world, ed, "HDRI Rotation", |ui, w| {
+                    let mut deg = w.hdri_rotation.to_degrees();
+                    let r = ui.add(
+                        egui::DragValue::new(&mut deg)
+                            .range(-360.0..=360.0)
+                            .speed(0.5)
+                            .suffix("°"),
+                    );
+                    w.hdri_rotation = deg.to_radians();
+                    r
+                })
+            })
+            .map(|r| r.on_hover_text("Turns the environment around the vertical axis."));
+        }
         row(ui, "Strength", |ui| {
             edit_resource::<WorldSettings, _>(ui, world, ed, "World Strength", |ui, w| {
                 ui.add(
@@ -180,7 +224,81 @@ fn world_tab(ui: &mut egui::Ui, world: &mut World, ed: &mut Editor) {
         })
         .map(|r| r.on_hover_text("Brightness multiplier of the world light and background."));
     });
+    section(ui, "world.probe", "Light Probe", false, |ui| {
+        row(ui, "Resolution", |ui| {
+            edit_resource::<WorldSettings, _>(ui, world, ed, "Probe Resolution", |ui, w| {
+                egui::ComboBox::from_id_salt("probe_res")
+                    .selected_text(w.probe_resolution.to_string())
+                    .show_ui(ui, |ui| {
+                        for r in [128u32, 256, 512, 1024, 2048] {
+                            ui.selectable_value(&mut w.probe_resolution, r, r.to_string());
+                        }
+                    })
+                    .response
+            })
+        })
+        .map(|r| {
+            r.on_hover_text(
+                "Size of the cube map the world is captured into. Higher = sharper reflections \
+                 of the sky on smooth metal; each step up uses 4× the memory and rebuild time.",
+            )
+        });
+    });
     schema_panels(ui, world, ed, settings::WORLD_PANELS, None);
+}
+
+/// Chooses an `.hdr` from assets/ for the HDRI world (undoable).
+fn hdri_picker(ui: &mut egui::Ui, world: &mut World, ed: &mut Editor) {
+    let files: Vec<String> = world
+        .get_resource::<ge_asset::AssetServer>()
+        .map(|s| {
+            s.registry()
+                .entries()
+                .filter(|e| e.importer == ge_asset::Importer::Hdr)
+                .map(|e| e.path.source().to_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let current = world
+        .resource::<WorldSettings>()
+        .hdri
+        .as_ref()
+        .map(|h| h.source().source().to_owned());
+    let mut chosen: Option<String> = None;
+    row(ui, "Image", |ui| {
+        egui::ComboBox::from_id_salt("hdri_file")
+            .selected_text(current.clone().unwrap_or_else(|| "None".into()))
+            .width(190.0)
+            .show_ui(ui, |ui| {
+                if files.is_empty() {
+                    ui.label(egui::RichText::new("Drop .hdr files into assets/").color(theme::TEXT_MUTED));
+                }
+                for f in &files {
+                    if ui.selectable_label(current.as_deref() == Some(f.as_str()), f).clicked() {
+                        chosen = Some(f.clone());
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Equirectangular Radiance .hdr images found in assets/ (e.g. from Poly Haven, CC0).");
+    });
+    if let Some(path) = chosen
+        && let Some(mut server) = world.get_resource_mut::<ge_asset::AssetServer>()
+    {
+        let handle = server.load::<ge_asset::Texture>(path.as_str());
+        let before = world.resource::<WorldSettings>().clone();
+        let mut after = before.clone();
+        after.hdri = Some(handle);
+        ed.history.execute(
+            world,
+            Box::new(crate::commands::SetResource {
+                before,
+                after,
+                label: "Set HDRI",
+            }),
+            None,
+        );
+    }
 }
 
 fn name_header(ui: &mut egui::Ui, world: &mut World, ed: &mut Editor, e: Entity) {
@@ -345,6 +463,16 @@ fn object_tab(ui: &mut egui::Ui, world: &mut World, ed: &mut Editor) {
                 edit_component::<Visibility, _>(ui, world, ed, e, "Toggle Visibility", |ui, v| {
                     ui.checkbox(&mut v.visible, "")
                 })
+            });
+        }
+        if world.get::<MeshRenderer>(e).is_some() {
+            row(ui, "Cast Shadow", |ui| {
+                edit_component::<MeshRenderer, _>(ui, world, ed, e, "Cast Shadow", |ui, m| {
+                    ui.checkbox(&mut m.cast_shadow, "")
+                })
+            })
+            .map(|r| {
+                r.on_hover_text("Whether this object blocks light from shadow-casting lamps.")
             });
         }
     });
@@ -615,56 +743,142 @@ fn light_tab(ui: &mut egui::Ui, world: &mut World, ed: &mut Editor, e: Entity) {
         .map(|r| r.on_hover_text("Extra stops on top of the power: +1 doubles it."));
         match light.kind {
             LightKind::Point | LightKind::Spot => {
-                planned_row(
-                    ui,
-                    "Radius",
-                    &format!("{:.2} m", light.radius),
-                    "Size of the light bulb: bigger = softer shadows and broader highlights.",
-                    Status::Planned("M4", "soft shadows"),
-                );
-                planned_row(
-                    ui,
-                    "Soft Falloff",
-                    if light.soft_falloff { "On" } else { "Off" },
-                    "Smooths the light's falloff near its surface to avoid hot spots.",
-                    Status::Planned("M4", "soft shadows"),
-                );
+                row(ui, "Radius", |ui| {
+                    edit_component::<Light, _>(ui, world, ed, e, "Light Radius", |ui, l| {
+                        ui.add(
+                            egui::DragValue::new(&mut l.radius)
+                                .range(0.0..=50.0)
+                                .speed(0.005)
+                                .suffix(" m"),
+                        )
+                    })
+                })
+                .map(|r| {
+                    r.on_hover_text(
+                        "Size of the light bulb. Bigger = broader, softer highlights and softer \
+                         shadow edges (approximated: the highlight uses the closest point on \
+                         the sphere, the shadow blur grows with radius).",
+                    )
+                });
+                row(ui, "Soft Falloff", |ui| {
+                    edit_component::<Light, _>(ui, world, ed, e, "Soft Falloff", |ui, l| {
+                        ui.checkbox(&mut l.soft_falloff, "")
+                    })
+                })
+                .map(|r| {
+                    r.on_hover_text(
+                        "Avoids the infinitely bright hot spot right next to a point light by \
+                         treating it as a small ball instead of a point.",
+                    )
+                });
             }
-            LightKind::Sun => planned_row(
-                ui,
-                "Angle",
-                &format!("{:.2}°", light.angle.to_degrees()),
-                "Angular diameter of the sun as seen from the ground (Earth's is 0.53°): bigger \
-                 = softer shadows.",
-                Status::Planned("M4", "soft shadows"),
-            ),
+            LightKind::Sun => {
+                row(ui, "Angle", |ui| {
+                    edit_component::<Light, _>(ui, world, ed, e, "Sun Angle", |ui, l| {
+                        let mut deg = l.angle.to_degrees();
+                        let r = ui.add(
+                            egui::DragValue::new(&mut deg)
+                                .range(0.0..=180.0)
+                                .speed(0.05)
+                                .suffix("°"),
+                        );
+                        l.angle = deg.to_radians();
+                        r
+                    })
+                })
+                .map(|r| {
+                    r.on_hover_text(
+                        "Angular diameter of the sun seen from the ground (Earth's is 0.53°). \
+                         Bigger = softer shadows and wider sun highlights on shiny surfaces.",
+                    )
+                });
+            }
             LightKind::Area => {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{} Until M4 an area light is shaded as a 180° light with cosine \
-                         falloff; its size and shape don't change the lighting yet.",
-                        icon::INFO
-                    ))
-                    .small()
-                    .color(theme::PLANNED),
+                row(ui, "Shape", |ui| {
+                    edit_component::<Light, _>(ui, world, ed, e, "Area Shape", |ui, l| {
+                        egui::ComboBox::from_id_salt("area_shape")
+                            .selected_text(l.area_shape.label())
+                            .show_ui(ui, |ui| {
+                                for shape in ge_render::AreaShape::ALL {
+                                    ui.selectable_value(&mut l.area_shape, shape, shape.label());
+                                }
+                            })
+                            .response
+                    })
+                })
+                .map(|r| {
+                    r.on_hover_text(
+                        "The emitting outline. Disk and ellipse are shaded as their bounding \
+                         square/rectangle for now (representative-point approximation).",
+                    )
+                });
+                let shape = light.area_shape;
+                let two_sizes = matches!(
+                    shape,
+                    ge_render::AreaShape::Rectangle | ge_render::AreaShape::Ellipse
                 );
-                planned_row(
-                    ui,
-                    "Shape / Size",
-                    &format!("Rectangle {:.1}×{:.1} m", light.size.x, light.size.y),
-                    "A rectangle, square, disk or ellipse emitting from one side. Larger areas \
-                     give softer light.",
-                    Status::Planned("M4", "area lights (LTC)"),
-                );
-                planned_row(
-                    ui,
-                    "Normalize",
-                    if light.normalize { "On" } else { "Off" },
-                    "Keep total power the same when resizing the area.",
-                    Status::Planned("M4", "area lights (LTC)"),
-                );
+                row(ui, if two_sizes { "Size X" } else { "Size" }, |ui| {
+                    edit_component::<Light, _>(ui, world, ed, e, "Area Size", |ui, l| {
+                        ui.add(
+                            egui::DragValue::new(&mut l.size.x)
+                                .range(0.001..=100.0)
+                                .speed(0.01)
+                                .suffix(" m"),
+                        )
+                    })
+                });
+                if two_sizes {
+                    row(ui, "Size Y", |ui| {
+                        edit_component::<Light, _>(ui, world, ed, e, "Area Size", |ui, l| {
+                            ui.add(
+                                egui::DragValue::new(&mut l.size.y)
+                                    .range(0.001..=100.0)
+                                    .speed(0.01)
+                                    .suffix(" m"),
+                            )
+                        })
+                    });
+                }
+                row(ui, "Normalize", |ui| {
+                    edit_component::<Light, _>(ui, world, ed, e, "Normalize", |ui, l| {
+                        ui.checkbox(&mut l.normalize, "")
+                    })
+                })
+                .map(|r| {
+                    r.on_hover_text(
+                        "On: the total power stays the same when you resize the light (a \
+                         bigger panel is softer, not brighter). Off: power is per square \
+                         metre, so bigger = brighter.",
+                    )
+                });
             }
         }
+    });
+
+    section(ui, "light.shadow", "Shadow", true, |ui| {
+        row(ui, "Cast Shadow", |ui| {
+            edit_component::<Light, _>(ui, world, ed, e, "Light Shadow", |ui, l| {
+                ui.checkbox(&mut l.cast_shadow, "")
+            })
+        })
+        .map(|r| {
+            r.on_hover_text(
+                "The sun uses up to 4 cascades; spot, point and area lights share a shadow \
+                 atlas, and the 8 nearest get shadows (r.Shadow.MaxLocal).",
+            )
+        });
+        row(ui, "Filter", |ui| {
+            edit_component::<Light, _>(ui, world, ed, e, "Shadow Filter", |ui, l| {
+                ui.add(
+                    egui::DragValue::new(&mut l.shadow_filter)
+                        .range(0.0..=10.0)
+                        .speed(0.02),
+                )
+            })
+        })
+        .map(|r| {
+            r.on_hover_text("Blurs the shadow edge (in shadow-map texels) to hide its pixels.")
+        });
     });
 
     if light.kind == LightKind::Spot {
@@ -957,6 +1171,13 @@ fn material_tab(ui: &mut egui::Ui, world: &mut World, ed: &mut Editor) {
                         emission_color: Vec3::from(asset.emissive),
                         emission_strength: if asset.emissive == [0.0; 3] { 0.0 } else { 1.0 },
                         backface_culling: !asset.double_sided,
+                        alpha: asset.base_color[3],
+                        render_method: if asset.alpha_mode == ge_asset::AlphaMode::Blend {
+                            ge_render::RenderMethod::Blended
+                        } else {
+                            ge_render::RenderMethod::Dithered
+                        },
+                        ..Default::default()
                     },
                     label: "Override Material",
                 }),
@@ -1046,6 +1267,44 @@ fn material_tab(ui: &mut egui::Ui, world: &mut World, ed: &mut Editor) {
                     color_linear(ui, &mut m.emission_color)
                 })
             });
+            row(ui, "Alpha", |ui| {
+                edit_component::<Material, _>(ui, world, ed, e, "Alpha", |ui, m| {
+                    ui.add(egui::Slider::new(&mut m.alpha, 0.0..=1.0))
+                })
+            })
+            .map(|r| {
+                r.on_hover_text(
+                    "Opacity. Below 1 the material becomes see-through, as decided by Settings ▸ \
+                     Render Method.",
+                )
+            });
+            row(ui, "IOR", |ui| {
+                edit_component::<Material, _>(ui, world, ed, e, "IOR", |ui, m| {
+                    ui.add(
+                        egui::DragValue::new(&mut m.ior)
+                            .range(1.0..=4.0)
+                            .speed(0.005),
+                    )
+                })
+            })
+            .map(|r| {
+                r.on_hover_text(
+                    "Index of refraction. Here it sets how reflective a non-metal is head-on \
+                     (1.5 → 4%, like plastic and glass; 1.33 water; 2.4 diamond). Bending light \
+                     through glass comes with refraction (M12).",
+                )
+            });
+            row(ui, "Specular IOR Level", |ui| {
+                edit_component::<Material, _>(ui, world, ed, e, "Specular IOR Level", |ui, m| {
+                    ui.add(egui::Slider::new(&mut m.specular_ior_level, 0.0..=1.0))
+                })
+            })
+            .map(|r| {
+                r.on_hover_text(
+                    "An artistic tweak of the reflection strength: 0.5 keeps the physical \
+                     value from the IOR, 0 removes reflections, 1 doubles them.",
+                )
+            });
             row(ui, "Emission Strength", |ui| {
                 edit_component::<Material, _>(ui, world, ed, e, "Emission Strength", |ui, m| {
                     ui.add(
@@ -1073,6 +1332,44 @@ fn material_tab(ui: &mut egui::Ui, world: &mut World, ed: &mut Editor) {
             r.on_hover_text(
                 "Skip drawing faces that point away from the camera. Off (Blender's default) \
                  shows both sides of planes and open meshes.",
+            )
+        });
+        row(ui, "", |ui| {
+            edit_component::<Material, _>(ui, world, ed, e, "Backface Culling (Shadow)", |ui, m| {
+                ui.checkbox(&mut m.backface_culling_shadow, "Shadow")
+            })
+        })
+        .map(|r| r.on_hover_text("Back faces don't cast shadows (useful for open meshes)."));
+        row(ui, "Render Method", |ui| {
+            edit_component::<Material, _>(ui, world, ed, e, "Render Method", |ui, m| {
+                let a = ui.selectable_value(
+                    &mut m.render_method,
+                    ge_render::RenderMethod::Dithered,
+                    "Dithered",
+                );
+                let b = ui.selectable_value(
+                    &mut m.render_method,
+                    ge_render::RenderMethod::Blended,
+                    "Blended",
+                );
+                a.union(b)
+            })
+        })
+        .map(|r| {
+            r.on_hover_text(
+                "How Alpha < 1 is drawn. Blended: classic see-through blending, sorted back to \
+                 front (can mis-sort when objects intersect). Dithered: EEVEE's stochastic \
+                 transparency needs TAA (M12); until then it is a hard cutout at alpha 0.5.",
+            )
+        });
+        row(ui, "Transparent Shadows", |ui| {
+            edit_component::<Material, _>(ui, world, ed, e, "Transparent Shadows", |ui, m| {
+                ui.checkbox(&mut m.transparent_shadows, "")
+            })
+        })
+        .map(|r| {
+            r.on_hover_text(
+                "Blended materials cast shadows (as a cutout of their alpha) instead of none.",
             )
         });
     });

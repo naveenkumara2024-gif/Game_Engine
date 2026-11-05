@@ -8,7 +8,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+ge_core.workspace = true
 ge_engine.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 ge_platform.workspace = true

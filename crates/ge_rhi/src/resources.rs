@@ -19,6 +19,10 @@ pub enum TextureFormat {
     Bgra8Unorm,
     Bgra8UnormSrgb,
     Rgba16Float,
+    /// Packed HDR color (no alpha), half the bandwidth of `Rgba16Float` (bloom chain).
+    Rg11b10Float,
+    Rgba32Float,
+    R32Float,
     /// Reversed-Z depth target (lore §6.7): clear to 0, compare `Greater`.
     Depth32Float,
     /// Block-compressed (4×4 texel blocks). Need [`Rhi::supports_bc`].
@@ -80,8 +84,9 @@ impl TextureFormat {
     pub fn bytes_per_pixel(self) -> u32 {
         match self {
             Self::Rgba8Unorm | Self::Rgba8UnormSrgb | Self::Bgra8Unorm | Self::Bgra8UnormSrgb => 4,
-            Self::Depth32Float => 4,
+            Self::Depth32Float | Self::Rg11b10Float | Self::R32Float => 4,
             Self::Rgba16Float => 8,
+            Self::Rgba32Float => 16,
             // Per-texel size is meaningless for block formats; see `level_layout`.
             _ => 0,
         }
@@ -94,6 +99,9 @@ impl TextureFormat {
             Self::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
             Self::Bgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
             Self::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
+            Self::Rg11b10Float => wgpu::TextureFormat::Rg11b10Ufloat,
+            Self::Rgba32Float => wgpu::TextureFormat::Rgba32Float,
+            Self::R32Float => wgpu::TextureFormat::R32Float,
             Self::Depth32Float => wgpu::TextureFormat::Depth32Float,
             Self::Bc1RgbaUnorm => wgpu::TextureFormat::Bc1RgbaUnorm,
             Self::Bc1RgbaUnormSrgb => wgpu::TextureFormat::Bc1RgbaUnormSrgb,
@@ -128,6 +136,8 @@ impl BufferUsage {
     pub const UNIFORM: Self = Self(wgpu::BufferUsages::UNIFORM);
     pub const COPY_SRC: Self = Self(wgpu::BufferUsages::COPY_SRC);
     pub const COPY_DST: Self = Self(wgpu::BufferUsages::COPY_DST);
+    pub const STORAGE: Self = Self(wgpu::BufferUsages::STORAGE);
+    pub const INDIRECT: Self = Self(wgpu::BufferUsages::INDIRECT);
 }
 
 impl BitOr for BufferUsage {
@@ -145,6 +155,7 @@ impl TextureUsage {
     pub const TEXTURE_BINDING: Self = Self(wgpu::TextureUsages::TEXTURE_BINDING);
     pub const COPY_SRC: Self = Self(wgpu::TextureUsages::COPY_SRC);
     pub const COPY_DST: Self = Self(wgpu::TextureUsages::COPY_DST);
+    pub const STORAGE_BINDING: Self = Self(wgpu::TextureUsages::STORAGE_BINDING);
 }
 
 impl BitOr for TextureUsage {
@@ -159,6 +170,10 @@ pub enum ShaderStages {
     Vertex,
     Fragment,
     VertexFragment,
+    Compute,
+    /// Fragment + compute (light lists read by shading and written by culling).
+    FragmentCompute,
+    All,
 }
 
 impl ShaderStages {
@@ -167,8 +182,48 @@ impl ShaderStages {
             Self::Vertex => wgpu::ShaderStages::VERTEX,
             Self::Fragment => wgpu::ShaderStages::FRAGMENT,
             Self::VertexFragment => wgpu::ShaderStages::VERTEX_FRAGMENT,
+            Self::Compute => wgpu::ShaderStages::COMPUTE,
+            Self::FragmentCompute => wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+            Self::All => wgpu::ShaderStages::all(),
         }
     }
+}
+
+/// How a texture is viewed by shaders and render targets.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum TextureDim {
+    D2,
+    D2Array,
+    Cube,
+}
+
+impl TextureDim {
+    fn to_wgpu(self) -> wgpu::TextureViewDimension {
+        match self {
+            Self::D2 => wgpu::TextureViewDimension::D2,
+            Self::D2Array => wgpu::TextureViewDimension::D2Array,
+            Self::Cube => wgpu::TextureViewDimension::Cube,
+        }
+    }
+}
+
+/// What a sampled texture binding returns.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum SampleKind {
+    Float {
+        filterable: bool,
+    },
+    /// Depth textures (`texture_depth_2d[_array]`), for comparison sampling.
+    Depth,
+}
+
+/// Depth bias in pipeline state (shadow maps). With reversed-Z, push *away* from the light
+/// with negative values.
+#[derive(Copy, Clone, PartialEq, Debug, Default)]
+pub struct DepthBias {
+    pub constant: i32,
+    pub slope_scale: f32,
+    pub clamp: f32,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -198,6 +253,8 @@ pub enum BlendMode {
     Alpha,
     /// Color already multiplied by alpha: `src.rgb + dst.rgb * (1 - src.a)` (egui, UI).
     PremultipliedAlpha,
+    /// `src + dst` (bloom accumulation, light accumulation).
+    Additive,
 }
 
 impl BlendMode {
@@ -205,6 +262,14 @@ impl BlendMode {
         match self {
             Self::Alpha => wgpu::BlendState::ALPHA_BLENDING,
             Self::PremultipliedAlpha => wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+            Self::Additive => wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent::OVER,
+            },
         }
     }
 }
@@ -234,7 +299,7 @@ pub enum CompareFunction {
 }
 
 impl CompareFunction {
-    fn to_wgpu(self) -> wgpu::CompareFunction {
+    pub(crate) fn to_wgpu(self) -> wgpu::CompareFunction {
         match self {
             Self::Never => wgpu::CompareFunction::Never,
             Self::Less => wgpu::CompareFunction::Less,
@@ -283,6 +348,8 @@ pub struct SamplerDesc<'a> {
     pub mipmaps: bool,
     /// Max anisotropy (1 = off). Only applies with linear filtering.
     pub anisotropy: u16,
+    /// Makes a comparison sampler (shadow maps): sampling returns the comparison result.
+    pub compare: Option<CompareFunction>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -296,6 +363,19 @@ pub enum BindingType {
     Texture2d,
     /// A filtering sampler.
     Sampler,
+    /// Any sampled texture: float/depth, 2D/array/cube.
+    Texture { sample: SampleKind, dim: TextureDim },
+    /// A storage buffer (`var<storage, read>` or `read_write`).
+    StorageBuffer { read_only: bool },
+    /// A comparison sampler (`sampler_comparison`).
+    ComparisonSampler,
+    /// A write-only storage texture (`texture_storage_2d[_array]<format, write>`).
+    StorageTexture {
+        format: TextureFormat,
+        dim: TextureDim,
+    },
+    /// A non-filtering sampler (for unfilterable float textures).
+    NonFilteringSampler,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -315,6 +395,8 @@ pub enum BindingResource<'a> {
     },
     Texture(&'a Texture),
     Sampler(&'a Sampler),
+    /// A specific view (mip range, layer, cube).
+    View(&'a TextureView),
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -349,7 +431,8 @@ pub struct RenderPipelineDesc<'a> {
     pub label: &'a str,
     pub shader: &'a ShaderModule,
     pub vertex_entry: &'a str,
-    pub fragment_entry: &'a str,
+    /// `None` = depth-only pipeline (shadow maps, prepass).
+    pub fragment_entry: Option<&'a str>,
     pub vertex_layouts: &'a [VertexLayout<'a>],
     pub bind_group_layouts: &'a [&'a BindGroupLayout],
     pub color_formats: &'a [TextureFormat],
@@ -357,6 +440,7 @@ pub struct RenderPipelineDesc<'a> {
     pub cull_mode: CullMode,
     /// `None` = opaque.
     pub blend: Option<BlendMode>,
+    pub depth_bias: Option<DepthBias>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -381,6 +465,62 @@ pub struct Texture {
     size: (u32, u32),
     format: TextureFormat,
     mip_levels: u32,
+    layers: u32,
+}
+
+/// A view of part of a texture: a mip range and a layer range, as 2D, array or cube.
+#[derive(Clone, Debug)]
+pub struct TextureView {
+    pub(crate) inner: wgpu::TextureView,
+    size: (u32, u32),
+}
+
+impl TextureView {
+    pub(crate) fn from_raw(inner: wgpu::TextureView, size: (u32, u32)) -> Self {
+        Self { inner, size }
+    }
+
+    /// Size of the view's first mip level in texels.
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+}
+
+/// Which part of a texture a [`TextureView`] covers.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ViewRange {
+    pub dim: TextureDim,
+    pub base_mip: u32,
+    pub mips: u32,
+    pub base_layer: u32,
+    pub layers: u32,
+}
+
+impl ViewRange {
+    /// One mip of one layer, as a 2D view (a render or storage target).
+    pub fn level(mip: u32, layer: u32) -> Self {
+        Self {
+            dim: TextureDim::D2,
+            base_mip: mip,
+            mips: 1,
+            base_layer: layer,
+            layers: 1,
+        }
+    }
+}
+
+/// A texture with layers (array or cube) and mips.
+#[derive(Copy, Clone, Debug)]
+pub struct TextureDescEx<'a> {
+    pub label: &'a str,
+    pub size: (u32, u32),
+    pub format: TextureFormat,
+    pub usage: TextureUsage,
+    pub mip_levels: u32,
+    /// 6 for a cube map.
+    pub layers: u32,
+    /// The default view: `D2Array` for arrays, `Cube` for cube maps.
+    pub dim: TextureDim,
 }
 
 impl Texture {
@@ -390,6 +530,44 @@ impl Texture {
 
     pub fn mip_levels(&self) -> u32 {
         self.mip_levels
+    }
+
+    pub fn layers(&self) -> u32 {
+        self.layers
+    }
+
+    /// The texture's default view (all mips and layers).
+    pub fn full_view(&self) -> TextureView {
+        TextureView {
+            inner: self.view.clone(),
+            size: self.size,
+        }
+    }
+
+    /// A view of part of the texture.
+    pub fn view(&self, range: ViewRange) -> TextureView {
+        let aspect = if self.format == TextureFormat::Depth32Float {
+            wgpu::TextureAspect::DepthOnly
+        } else {
+            wgpu::TextureAspect::All
+        };
+        TextureView {
+            inner: self.inner.create_view(&wgpu::TextureViewDescriptor {
+                label: None,
+                format: None,
+                dimension: Some(range.dim.to_wgpu()),
+                usage: None,
+                aspect,
+                base_mip_level: range.base_mip,
+                mip_level_count: Some(range.mips.max(1)),
+                base_array_layer: range.base_layer,
+                array_layer_count: Some(range.layers.max(1)),
+            }),
+            size: (
+                (self.size.0 >> range.base_mip).max(1),
+                (self.size.1 >> range.base_mip).max(1),
+            ),
+        }
     }
 
     pub fn format(&self) -> TextureFormat {
@@ -466,13 +644,28 @@ impl Rhi {
 
     /// A 2D texture with `mip_levels` levels (fill each with [`Rhi::write_texture_mip`]).
     pub fn create_texture_mips(&self, desc: &TextureDesc<'_>, mip_levels: u32) -> Texture {
+        self.create_texture_ex(&TextureDescEx {
+            label: desc.label,
+            size: desc.size,
+            format: desc.format,
+            usage: desc.usage,
+            mip_levels,
+            layers: 1,
+            dim: TextureDim::D2,
+        })
+    }
+
+    /// Arrays and cube maps (shadow cascades, environment cubes).
+    pub fn create_texture_ex(&self, desc: &TextureDescEx<'_>) -> Texture {
+        let mip_levels = desc.mip_levels;
+        let layers = desc.layers.max(1);
         let (width, height) = desc.size;
         let inner = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(desc.label),
             size: wgpu::Extent3d {
                 width: width.max(1),
                 height: height.max(1),
-                depth_or_array_layers: 1,
+                depth_or_array_layers: layers,
             },
             mip_level_count: mip_levels.max(1),
             sample_count: 1,
@@ -481,14 +674,62 @@ impl Rhi {
             usage: desc.usage.0,
             view_formats: &[],
         });
-        let view = inner.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = inner.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(desc.dim.to_wgpu()),
+            ..Default::default()
+        });
         Texture {
             inner,
             view,
             size: (width.max(1), height.max(1)),
             format: desc.format,
             mip_levels: mip_levels.max(1),
+            layers,
         }
+    }
+
+    /// Uploads one whole mip level of one layer (cube face / array slice).
+    pub fn write_texture_layer(
+        &self,
+        texture: &Texture,
+        mip: u32,
+        layer: u32,
+        data: &[u8],
+    ) -> Result<(), RhiError> {
+        let w = (texture.size.0 >> mip).max(1);
+        let h = (texture.size.1 >> mip).max(1);
+        let (bytes, row, rows) = texture.format.level_layout(w, h);
+        if mip >= texture.mip_levels || layer >= texture.layers || data.len() != bytes as usize {
+            return Err(RhiError::Upload(format!(
+                "mip {mip} layer {layer} of a {:?} texture needs {bytes} bytes, got {}",
+                texture.format,
+                data.len()
+            )));
+        }
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture.inner,
+                mip_level: mip,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(rows),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        Ok(())
     }
 
     /// Uploads one whole mip level (tightly packed rows, or blocks for compressed formats).
@@ -595,6 +836,7 @@ impl Rhi {
                 } else {
                     1
                 },
+                compare: desc.compare.map(CompareFunction::to_wgpu),
                 ..Default::default()
             }),
         }
@@ -646,6 +888,34 @@ impl Rhi {
                     BindingType::Sampler => {
                         wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)
                     }
+                    BindingType::NonFilteringSampler => {
+                        wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering)
+                    }
+                    BindingType::ComparisonSampler => {
+                        wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison)
+                    }
+                    BindingType::Texture { sample, dim } => wgpu::BindingType::Texture {
+                        sample_type: match sample {
+                            SampleKind::Float { filterable } => {
+                                wgpu::TextureSampleType::Float { filterable }
+                            }
+                            SampleKind::Depth => wgpu::TextureSampleType::Depth,
+                        },
+                        view_dimension: dim.to_wgpu(),
+                        multisampled: false,
+                    },
+                    BindingType::StorageBuffer { read_only } => wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    BindingType::StorageTexture { format, dim } => {
+                        wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: format.to_wgpu(),
+                            view_dimension: dim.to_wgpu(),
+                        }
+                    }
                 },
                 count: None,
             })
@@ -686,6 +956,7 @@ impl Rhi {
                     BindingResource::Sampler(sampler) => {
                         wgpu::BindingResource::Sampler(&sampler.inner)
                     }
+                    BindingResource::View(view) => wgpu::BindingResource::TextureView(&view.inner),
                 },
             })
             .collect();
@@ -782,12 +1053,18 @@ impl Rhi {
                     depth_write_enabled: Some(d.write_enabled),
                     depth_compare: Some(d.compare.to_wgpu()),
                     stencil: Default::default(),
-                    bias: Default::default(),
+                    bias: desc
+                        .depth_bias
+                        .map_or_else(Default::default, |b| wgpu::DepthBiasState {
+                            constant: b.constant,
+                            slope_scale: b.slope_scale,
+                            clamp: b.clamp,
+                        }),
                 }),
                 multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
+                fragment: desc.fragment_entry.map(|entry| wgpu::FragmentState {
                     module: &desc.shader.inner,
-                    entry_point: Some(desc.fragment_entry),
+                    entry_point: Some(entry),
                     compilation_options: Default::default(),
                     targets: &targets,
                 }),

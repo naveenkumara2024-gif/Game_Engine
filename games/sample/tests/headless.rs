@@ -115,8 +115,9 @@ fn children_follow_and_extract_sees_everything() {
 
     let snap = world.resource::<RenderSnapshot>();
     assert!(snap.camera.is_some(), "camera extracted");
-    // floor + 10 pillars + 6 cluster cubes + player + 2 shoulders + antenna
-    assert_eq!(snap.items.len(), 1 + 10 + 6 + 1 + 2 + 1);
+    // floor + 10 pillars + 6 cluster cubes + player + 2 shoulders + antenna, plus Orb Run's
+    // 3 orbs and 2 starting sentinels.
+    assert_eq!(snap.items.len(), 1 + 10 + 6 + 1 + 2 + 1 + 3 + 2);
 }
 
 #[test]
@@ -131,4 +132,97 @@ fn escape_requests_exit() {
     );
     app.update(Duration::from_millis(16));
     assert_eq!(app.exit_requested(), Some("quit action"));
+}
+
+fn round(app: &App) -> sample::game::Round {
+    app.world().resource::<sample::game::Round>().clone()
+}
+
+/// Orb Run: standing still scores nothing, sentinels catch the player within the round, and R
+/// starts a fresh run.
+#[test]
+fn idle_player_is_caught_and_r_restarts() {
+    use sample::game::{LIVES, Phase};
+    let mut app = app();
+    run_for(&mut app, 3.0, 60.0);
+    let r = round(&app);
+    assert_eq!(r.score, 0, "no orbs without moving");
+    let start = player_position(&mut app);
+    assert!(
+        start.distance(Vec3::new(0.0, 0.5, 0.0)) < 1e-3,
+        "player stays put: {start}"
+    );
+
+    run_for(&mut app, 40.0, 60.0);
+    let r = round(&app);
+    assert_eq!(r.phase, Phase::Over { survived: false }, "{r:?}");
+    assert_eq!(r.lives, 0);
+    assert!(
+        app.world().resource::<WindowStatus>().0.contains("CAUGHT"),
+        "HUD: {:?}",
+        app.world().resource::<WindowStatus>().0
+    );
+
+    key(
+        &mut app.world_mut().resource_mut::<PlatformEvents>(),
+        "KeyR",
+        true,
+    );
+    run_for(&mut app, 0.1, 60.0);
+    key(
+        &mut app.world_mut().resource_mut::<PlatformEvents>(),
+        "KeyR",
+        false,
+    );
+    let r = round(&app);
+    assert!(r.playing(), "restarted");
+    assert_eq!(r.lives, LIVES);
+}
+
+/// Walking straight to an orb collects it, and it reappears elsewhere.
+#[test]
+fn walking_into_an_orb_scores() {
+    use sample::game::Orb;
+    let mut app = app();
+    run_for(&mut app, 0.1, 60.0);
+    let target = {
+        let world = app.world_mut();
+        let mut q = world.query::<&Orb>();
+        q.iter(world).next().unwrap().home
+    };
+    // Teleport-free: steer with WASD toward the orb using the camera basis each frame.
+    for _ in 0..(10 * 60) {
+        if round(&app).score > 0 {
+            break;
+        }
+        let here = player_position(&mut app);
+        let yaw = {
+            let world = app.world_mut();
+            let mut q = world.query::<&OrbitCamera>();
+            q.single(world).unwrap().yaw
+        };
+        let (forward, right) = camera_basis(yaw);
+        let to = Vec3::new(target.x - here.x, 0.0, target.z - here.z);
+        let events = &mut app.world_mut().resource_mut::<PlatformEvents>();
+        for (k, on) in [
+            ("KeyW", to.dot(forward) > 0.2),
+            ("KeyS", to.dot(forward) < -0.2),
+            ("KeyD", to.dot(right) > 0.2),
+            ("KeyA", to.dot(right) < -0.2),
+        ] {
+            key(events, k, on);
+        }
+        app.update(Duration::from_secs_f64(1.0 / 60.0));
+    }
+    assert!(round(&app).score >= 1, "collected: {:?}", round(&app));
+}
+
+/// A long first frame (startup hitch) must not move the player or score.
+#[test]
+fn startup_hitch_does_not_score() {
+    let mut app = app();
+    app.update(Duration::from_millis(700));
+    run_for(&mut app, 2.0, 144.0);
+    let r = round(&app);
+    assert_eq!(r.score, 0, "{r:?} player at {}", player_position(&mut app));
 }

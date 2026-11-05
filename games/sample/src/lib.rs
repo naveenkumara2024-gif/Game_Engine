@@ -1,11 +1,13 @@
 //! The vertical-slice game: a small **third-person arena** (CLAUDE.md §1, §11). Every engine
-//! milestone is "done" when this game can use it. Today: walk a player around an arena with a
-//! follow camera; later milestones add physics, animation, UI and audio here.
+//! milestone is "done" when this game can use it. Today it is **Orb Run** ([`game`]): collect
+//! orbs against the clock while sentinels chase you. Later milestones add physics, animation,
+//! UI and audio here.
 
 #![forbid(unsafe_code)]
 
 pub mod arena;
 pub mod camera;
+pub mod game;
 pub mod player;
 
 use ge_engine::prelude::*;
@@ -15,6 +17,7 @@ pub mod actions {
     pub const MOVE: &str = "Move";
     pub const ORBIT: &str = "Orbit";
     pub const QUIT: &str = "Quit";
+    pub const RESTART: &str = "Restart";
 }
 
 #[derive(Debug, Default)]
@@ -35,7 +38,10 @@ impl Plugin for SamplePlugin {
             .bind_axis2d(actions::MOVE, Axis2dBinding::wasd())
             .bind_axis2d(actions::MOVE, Axis2dBinding::arrows())
             .bind_button(actions::ORBIT, Binding::Mouse(MouseButton::Right))
-            .bind_button(actions::QUIT, Binding::key("Escape"));
+            .bind_button(actions::QUIT, Binding::key("Escape"))
+            .bind_button(actions::RESTART, Binding::key("KeyR"))
+            .bind_button(actions::RESTART, Binding::key("Enter"));
+        app.world_mut().init_resource::<game::Round>();
 
         app.add_systems(
             TickGroup::Startup,
@@ -45,13 +51,26 @@ impl Plugin for SamplePlugin {
                 camera::spawn_camera,
             ),
         )
-        .add_systems(TickGroup::PrePhysics, (camera::orbit_input, quit_on_action))
+        .add_systems(TickGroup::First, game::track_play_state)
+        .add_systems(
+            TickGroup::PrePhysics,
+            (
+                camera::orbit_input,
+                quit_on_action,
+                (game::restart_input, game::setup_round).chain(),
+            ),
+        )
         .add_systems(TickGroup::FixedUpdate, player::move_player)
         .add_systems(
             TickGroup::PostPhysics,
-            (player::interpolate_motion, camera::follow_player).chain(),
+            (
+                player::interpolate_motion,
+                game::play_round,
+                camera::follow_player,
+            )
+                .chain(),
         )
-        .add_systems(TickGroup::Animation, arena::spin);
+        .add_systems(TickGroup::Animation, (arena::spin, game::animate));
     }
 }
 

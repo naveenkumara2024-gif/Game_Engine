@@ -22,7 +22,7 @@ use crate::types::{
     SubRef,
 };
 
-pub const IMPORTER_VERSION: u32 = 1;
+pub const IMPORTER_VERSION: u32 = 2;
 
 fn err(m: impl std::fmt::Display) -> AssetError {
     AssetError::Import(format!("glTF: {m}"))
@@ -202,13 +202,19 @@ pub fn import(
                 .read_normals()
                 .map(|n| n.collect())
                 .unwrap_or_else(|| smooth_normals(&positions, &indices));
+            let tangents: Option<Vec<[f32; 4]>> = reader.read_tangents().map(|t| t.collect());
+            let has_tangents = tangents.as_ref().is_some_and(|t| t.len() == n);
             let mut m = Mesh {
                 positions,
                 normals,
                 uvs,
+                tangents: tangents.unwrap_or_default(),
                 indices,
                 ..Default::default()
             };
+            if !has_tangents {
+                m.generate_tangents();
+            }
             if !m.is_valid() {
                 warn!(
                     mesh = mesh.index(),
