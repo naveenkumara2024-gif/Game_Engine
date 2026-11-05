@@ -77,8 +77,14 @@ impl Default for WindowInfo {
 pub struct EngineStats {
     pub adapter: String,
     pub backend: String,
+    /// Main-thread frame time (includes waiting for the render thread).
     pub cpu_ms: f32,
+    /// Wall time of the render thread's last frame, including its waits on acquire/present
+    /// (vsync), so at the refresh rate it reads about one refresh interval.
+    pub render_ms: f32,
     pub gpu_ms: Option<f32>,
+    /// Most frames the render thread was behind during the last second (≤ 1, law 3).
+    pub render_lag: u64,
     pub fps: f32,
 }
 

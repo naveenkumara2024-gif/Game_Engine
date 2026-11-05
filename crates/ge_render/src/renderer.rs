@@ -695,14 +695,15 @@ impl Renderer {
     /// Records one frame (see the module docs for the pass order). The per-frame uploads
     /// happen first, then every pass is declared in a [`RenderGraph`], which culls,
     /// allocates and records them.
-    pub fn render_frame(&mut self, rhi: &Rhi, frame: &mut Frame, inputs: FrameInputs<'_>) {
+    pub fn render_frame(&mut self, rhi: &Rhi, frame: &mut Frame, mut inputs: FrameInputs<'_>) {
         let _span = info_span!("Render::Scene", proxies = self.scene.len()).entered();
         self.frame_index += 1;
-        if let Some(uploads) = inputs.asset_uploads {
+        if let Some(uploads) = inputs.asset_uploads.take() {
             self.assets.apply(rhi, uploads);
         }
         let size = frame.size();
         if size.0 == 0 || size.1 == 0 {
+            self.absorb(rhi, inputs);
             return;
         }
 
@@ -836,14 +837,7 @@ impl Renderer {
         self.frame.upload(rhi, &view_uniform, &light_uniforms);
 
         // Render world: apply this frame's changes, upload dirty slots, rebuild bins if needed.
-        match inputs.scene {
-            Some(delta) => {
-                for (key, item) in delta.drain() {
-                    self.scene.apply(key, item);
-                }
-            }
-            None => self.scene.sync_items(inputs.items),
-        }
+        self.apply_scene(inputs.scene.take(), inputs.items);
         self.upload_objects(rhi);
         self.scene.update_bins();
         self.prepare_primitives(rhi);
@@ -927,6 +921,31 @@ impl Renderer {
                     self.warned_graph = true;
                 }
             }
+        }
+    }
+
+    /// Applies a frame's queued changes without drawing it: asset uploads, the scene delta and
+    /// UI texture updates. For frames that can't be presented (minimized window, surface
+    /// timeout) so their changes still land (plan 0008 step 3). Object uploads and bin rebuilds
+    /// wait for the next drawn frame.
+    pub fn absorb(&mut self, rhi: &Rhi, inputs: FrameInputs<'_>) {
+        if let Some(uploads) = inputs.asset_uploads {
+            self.assets.apply(rhi, uploads);
+        }
+        self.apply_scene(inputs.scene, inputs.items);
+        if let Some(ui) = inputs.ui {
+            self.ui.apply_textures(rhi, &mut ui.textures);
+        }
+    }
+
+    fn apply_scene(&mut self, scene: Option<&mut SceneDelta>, items: &[DrawItem]) {
+        match scene {
+            Some(delta) => {
+                for (key, item) in delta.drain() {
+                    self.scene.apply(key, item);
+                }
+            }
+            None => self.scene.sync_items(items),
         }
     }
 

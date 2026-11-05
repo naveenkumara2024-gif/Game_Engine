@@ -1,37 +1,31 @@
-//! Platform glue: drives an [`App`] from the OS event loop, owns the window and the GPU, and
-//! hands each frame's `RenderSnapshot` to the renderer (lore §6.3).
+//! Platform glue: drives an [`App`] from the OS event loop and owns the window. The GPU lives
+//! on the render thread ([`crate::render_thread`]); each tick hands that frame's
+//! `RenderSnapshot` over (lore §6.3, plan 0008 step 3).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ge_ecs::prelude::Vec3;
 use ge_platform::{PlatformApp, PlatformContext, PlatformEvent, Window};
-use ge_render::{FrameInputs, RenderSnapshot, RenderView, Renderer};
-use ge_rhi::{Rhi, Swapchain};
+use ge_render::{RenderSnapshot, Renderer};
+use ge_rhi::Rhi;
 use ge_shader::ShaderLibrary;
 use tracing::{debug, error, info, info_span, warn};
 
 use crate::input::PlatformEvents;
+use crate::render_thread::{GpuWorker, R_RENDER_THREAD, RenderLink};
 use crate::{
     App, EXIT_WINDOW_CLOSED, EngineStats, R_CLEAR_COLOR, WindowInfo, WindowStatus, pacing,
 };
 
-/// Tick period while the window can't present (≈60 Hz keeps simulation alive cheaply).
-const MINIMIZED_TICK: Duration = Duration::from_millis(16);
-
-struct Gpu {
-    rhi: Rhi,
-    swapchain: Swapchain,
-    renderer: Renderer,
-}
-
 pub(crate) struct Engine<'a> {
     app: &'a mut App,
     window: Option<Arc<Window>>,
-    gpu: Option<Gpu>,
+    render: Option<RenderLink>,
     frame: u64,
     last_tick: Instant,
     stats: FrameStats,
+    /// Highest render lag seen in the current stats window.
+    max_lag: u64,
     /// The last stats readout and game status shown in the title.
     title_stats: String,
     title_status: String,
@@ -42,73 +36,35 @@ impl<'a> Engine<'a> {
         Self {
             app,
             window: None,
-            gpu: None,
+            render: None,
             frame: 0,
             last_tick: Instant::now(),
             stats: FrameStats::default(),
+            max_lag: 0,
             title_stats: String::new(),
             title_status: String::new(),
         }
     }
 
+    /// Hands this tick's snapshot to the render side (blocks while it is a frame behind).
     fn render(&mut self) {
-        let Some(Gpu {
-            rhi,
-            swapchain,
-            renderer,
-        }) = &mut self.gpu
-        else {
+        let Some(link) = &mut self.render else {
             return;
         };
-        // Shader hot reload runs even while minimized, so edits are picked up on restore.
-        renderer.update(rhi);
-        if !swapchain.is_presentable() {
-            // Minimized: nothing to draw, so don't spin a core at millions of ticks/s.
-            std::thread::sleep(MINIMIZED_TICK);
-            return;
+        let world = self.app.world_mut();
+        if !world.contains_resource::<RenderSnapshot>() {
+            world.init_resource::<RenderSnapshot>();
         }
-        match rhi.begin_frame(swapchain) {
-            Ok(Some(mut frame)) => {
-                let world = self.app.world_mut();
-                if !world.contains_resource::<RenderSnapshot>() {
-                    world.init_resource::<RenderSnapshot>();
-                }
-                let mut snapshot = world.resource_mut::<RenderSnapshot>();
-                let snapshot = &mut *snapshot;
-                // The world is the background (scene-linear; tonemapping color-manages it
-                // with the rest of the frame, as Blender does).
-                let background = snapshot
-                    .world
-                    .map_or_else(|| R_CLEAR_COLOR.get(), |w| w.radiance().to_array());
-                let view = RenderView {
-                    camera: snapshot.camera.unwrap_or_default(),
-                    time: snapshot.time,
-                    clear_color: background,
-                };
-                let inputs = FrameInputs {
-                    view: &view,
-                    items: &[],
-                    scene: Some(&mut snapshot.scene),
-                    lights: &snapshot.lights,
-                    world: snapshot.world,
-                    ambient: Vec3::ZERO,
-                    color: snapshot.color,
-                    look: snapshot.look,
-                    shading: snapshot.shading,
-                    direct_light: snapshot.direct_light,
-                    bloom: snapshot.bloom,
-                    overlays: snapshot.overlays,
-                    ui: Some(&mut snapshot.ui),
-                    asset_uploads: Some(&mut snapshot.asset_uploads),
-                };
-                renderer.render_frame(rhi, &mut frame, inputs);
-                rhi.end_frame(swapchain, frame);
-            }
-            Ok(None) => {}
-            Err(e) => {
-                error!(error = %e, "fatal render error");
-                self.app.request_exit("render error");
-            }
+        let mut snapshot = world.resource_mut::<RenderSnapshot>();
+        let submitted = link.submit(&mut snapshot, R_CLEAR_COLOR.get());
+        self.max_lag = self.max_lag.max(link.lag());
+        let fatal = link.take_fatal();
+        if let Err(e) = submitted {
+            error!(error = %e, "render thread is gone");
+            self.app.request_exit("render thread");
+        } else if let Some(e) = fatal {
+            error!(error = %e, "fatal render error");
+            self.app.request_exit("render error");
         }
     }
 
@@ -141,22 +97,30 @@ impl<'a> Engine<'a> {
     fn measure(&mut self, avg: Duration) -> String {
         // GPU time comes from timestamps, not fps: on this laptop presentation is capped by the
         // cross-adapter copy (CLAUDE.md §9).
-        let timings = self.gpu.as_ref().and_then(|g| g.rhi.gpu_timings());
+        let link = self.render.as_ref();
+        let timings = link.and_then(RenderLink::gpu_timings);
+        let render_ms = link.map_or(0.0, RenderLink::render_ms);
         let gpu_ms = timings.map_or_else(|| "n/a".to_owned(), |t| format!("{:.2} ms", t.total_ms));
+        let lag = std::mem::take(&mut self.max_lag);
         {
             let gpu_total = timings.map(|t| t.total_ms);
             let mut stats = self.app.world_mut().resource_mut::<EngineStats>();
             stats.cpu_ms = avg.as_secs_f32() * 1000.0;
             stats.gpu_ms = gpu_total;
+            stats.render_ms = render_ms;
+            stats.render_lag = lag;
             stats.fps = 1.0 / avg.as_secs_f32();
         }
         debug!(
             cpu_ms = avg.as_secs_f64() * 1000.0,
+            render_ms,
+            lag,
+            gpu_ms = ?timings.map(|t| t.total_ms),
             gpu = ?timings.map(|t| &t.passes),
             "frame stats"
         );
         format!(
-            "CPU {:.2} ms | GPU {gpu_ms} | {:.0} fps",
+            "Frame {:.2} ms | Render {render_ms:.2} ms | GPU {gpu_ms} | lag {lag} | {:.0} fps",
             avg.as_secs_f64() * 1000.0,
             1.0 / avg.as_secs_f64()
         )
@@ -183,12 +147,13 @@ impl PlatformApp for Engine<'_> {
             stats.adapter = rhi.adapter().name.clone();
             stats.backend = rhi.adapter().backend.clone();
         }
-        self.window = Some(window);
-        self.gpu = Some(Gpu {
+        let worker = GpuWorker {
             rhi,
             swapchain,
             renderer,
-        });
+        };
+        self.render = Some(RenderLink::new(Box::new(worker), R_RENDER_THREAD.get())?);
+        self.window = Some(window);
         self.app.startup();
         self.last_tick = Instant::now();
         Ok(())
@@ -198,8 +163,11 @@ impl PlatformApp for Engine<'_> {
         match &event {
             PlatformEvent::CloseRequested => self.app.request_exit(EXIT_WINDOW_CLOSED),
             PlatformEvent::Resized { width, height } => {
-                if let Some(gpu) = &mut self.gpu {
-                    gpu.swapchain.resize(&gpu.rhi, *width, *height);
+                if let Some(link) = &mut self.render
+                    && let Err(e) = link.resize(*width, *height)
+                {
+                    error!(error = %e, "render thread is gone");
+                    self.app.request_exit("render thread");
                 }
                 self.app.world_mut().resource_mut::<WindowInfo>().size = (*width, *height);
             }
@@ -244,8 +212,10 @@ impl PlatformApp for Engine<'_> {
             reason = self.app.exit_requested().unwrap_or("os"),
             "shutting down"
         );
-        // GPU objects before the window they present to.
-        self.gpu = None;
+        // Join the render thread (it drops the GPU objects) before the window they present to.
+        if let Some(mut link) = self.render.take() {
+            link.shutdown();
+        }
         self.window = None;
     }
 }

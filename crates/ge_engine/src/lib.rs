@@ -15,6 +15,7 @@ pub mod input;
 mod pacing;
 mod plugin;
 mod plugins;
+mod render_thread;
 mod runner;
 mod schedule;
 
@@ -25,6 +26,7 @@ pub use ge_platform::{Modifiers, MouseButton, PlatformEvent, WindowDesc};
 pub use pacing::T_MAX_FPS;
 pub use plugin::{Plugin, PluginError, Plugins};
 pub use plugins::{AssetPlugin, DefaultPlugins, InputPlugin, RenderPlugin, TransformPlugin};
+pub use render_thread::R_RENDER_THREAD;
 pub use schedule::{SimulationState, TickGroup};
 
 ge_core::declare_cvar!(pub static R_CLEAR_COLOR: [f32; 3] =
@@ -58,7 +60,7 @@ pub mod prelude {
 mod tests {
     #[test]
     fn engine_cvars_registered() {
-        for name in ["r.ClearColor", "p.FixedHz", "t.MaxFps"] {
+        for name in ["r.ClearColor", "p.FixedHz", "t.MaxFps", "r.RenderThread"] {
             assert!(ge_core::cvar::find(name).is_some(), "{name}");
         }
     }

@@ -282,7 +282,7 @@ impl UiRenderer {
         }
     }
 
-    fn apply_textures(&mut self, rhi: &Rhi, updates: &mut Vec<UiTextureUpdate>) {
+    pub(crate) fn apply_textures(&mut self, rhi: &Rhi, updates: &mut Vec<UiTextureUpdate>) {
         for update in updates.drain(..) {
             match update {
                 UiTextureUpdate::Set {

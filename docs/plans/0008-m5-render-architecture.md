@@ -1,6 +1,6 @@
 # 0008 — M5: Render architecture
 
-**Status:** approved 2026-11-05 (as proposed) · in progress: steps 1 (render graph) and 2 (render world) done 2026-11-05; step 3 next · **Milestone:** M5 (CLAUDE.md §9, lore §8)
+**Status:** **done 2026-11-05** (all three steps; see Progress and deviations) · approved 2026-11-05 (as proposed) · **Milestone:** M5 (CLAUDE.md §9, lore §8)
 
 ## Progress and deviations
 
@@ -31,6 +31,29 @@ Step 2 deviations:
 - **The material-asset hot reload is covered by the code path, not a dedicated test.** It re-upserts that material's users, but no test builds an `AssetServer` fixture for it. The M3 hot-reload manual test exercises it.
 
 - **The IBL environment bake runs before the graph.** It is a persistent, change-driven bake that mutates `Environment`, not a per-frame pass. It can move into the graph as a side-effect pass when it gets a GPU timestamp budget of its own.
+
+**Step 3 (render thread) is done.** `ge_engine::render_thread`:
+- A long-lived `RenderThread` owns `Rhi`, `Swapchain` and `Renderer`; the main thread keeps the window and the simulation.
+- Commands go one way and events come back, over crossbeam channels; the threads share no mutable state.
+- Frames cross a **rendezvous** channel (capacity 0), so `submit(N)` returns only once the render thread has finished N−1. The main thread is at most one frame ahead (law 3), measured as `EngineStats.render_lag` and shown in the title.
+- Snapshots are boxed and recycled: three exist in steady state, and contents are swapped rather than reallocated. A frame the render side can't present (minimized, surface timeout) goes through the new `Renderer::absorb`, so asset uploads, scene deltas and UI textures still land. Anything left undrained comes back in the recycled snapshot and merges into the next frame.
+- `r.RenderThread 0` runs the same worker inline. A compile-time assertion checks that the GPU side is `Send`.
+- Render-thread errors reach the main thread as events, and a panic shows up as a dead channel. Either way the main thread exits cooperatively ("render error" / "render thread").
+
+Measured on the RTX 3050, Turbo plan, 1920×1080:
+- **Latency:** the threaded run holds `lag = 1` and the inline run `lag = 0`, both at the 144 Hz vsync (6.9 ms main-thread frames). Both shut down cleanly through the normal window close, and the render thread joins.
+- **A/B against the pre-M5 commit `33f6e2c`** (Release, same settings, two alternating runs each): GPU total is 2.30–2.77 ms (before) vs 2.43–2.78 ms (M5), the same within noise. Every pass other than Opaque matches to within 0.01 ms. Opaque moves with where the Orb Run camera is in both builds. Plan 0006's 1.9 ms was measured before Orb Run added its lights and actors.
+- **Stress (`sample.StressLights=256`):** 3.9–7.7 ms GPU as the lights move, inside M4's ≈6.3 ms band and the ≤12 ms gate.
+
+Step 3 deviations:
+- **`render_ms` is wall time, not pure CPU time.** It includes the render thread's waits on acquire and present (vsync), so at the refresh rate it reads about one refresh interval. A pure-CPU split would need a span around submission; Tracy already shows that.
+- **While minimized, the render thread sleeps 16 ms per frame**, and the rendezvous paces the main thread to about 60 Hz. That replaces the main thread's old minimized sleep, with the same behavior.
+- **Manual checks still open:**
+  - resize/minimize/restore and a shader edit while minimized (steps 2–3 of the manual tests);
+  - editor Edit → Play → Stop and the grid/bloom toggles;
+  - the Tracy `RenderThread` lane.
+  
+  None of them can be automated here. The headless and unit tests cover the same code paths.
 
 ## Goal
 
