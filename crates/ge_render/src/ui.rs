@@ -11,9 +11,9 @@ use std::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
 use ge_rhi::{
     AddressMode, BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
-    BindingType, BlendMode, Buffer, BufferDesc, BufferUsage, CullMode, FilterMode, Frame, LoadOp,
-    RenderPassDesc, RenderPipeline, RenderPipelineDesc, Rhi, Sampler, SamplerDesc, ShaderStages,
-    Texture, TextureDesc, TextureFormat, TextureUsage, VertexAttribute, VertexFormat, VertexLayout,
+    BindingType, BlendMode, Buffer, BufferDesc, BufferUsage, CullMode, FilterMode, RenderPass,
+    RenderPipeline, RenderPipelineDesc, Rhi, Sampler, SamplerDesc, ShaderStages, Texture,
+    TextureDesc, TextureFormat, TextureUsage, VertexAttribute, VertexFormat, VertexLayout,
 };
 use ge_shader::ShaderLibrary;
 use tracing::{error, info_span, warn};
@@ -386,20 +386,19 @@ impl UiRenderer {
         }
     }
 
-    /// Applies pending texture updates (draining `list.textures`) and draws `list.meshes` over
-    /// whatever the frame already contains.
-    pub fn render(&mut self, rhi: &Rhi, frame: &mut Frame, list: &mut UiDrawList) {
-        let _span = info_span!("Render::Ui", meshes = list.meshes.len()).entered();
+    /// Applies pending texture updates (draining `list.textures`) and uploads `list.meshes`
+    /// for a `size` target. Returns the draws for [`UiRenderer::record`], or `None` when
+    /// there's nothing to draw (then the graph adds no Ui pass).
+    pub(crate) fn prepare(
+        &mut self,
+        rhi: &Rhi,
+        (width, height): (u32, u32),
+        list: &mut UiDrawList,
+    ) -> Option<UiDraws> {
+        let _span = info_span!("Render::UiPrepare", meshes = list.meshes.len()).entered();
         self.apply_textures(rhi, &mut list.textures);
-        if list.meshes.is_empty() {
-            return;
-        }
-        let Some(pipeline) = &self.pipeline else {
-            return;
-        };
-        let (width, height) = frame.size();
-        if width == 0 || height == 0 {
-            return;
+        if list.meshes.is_empty() || self.pipeline.is_none() || width == 0 || height == 0 {
+            return None;
         }
 
         self.vertex_staging.clear();
@@ -421,15 +420,15 @@ impl UiRenderer {
             let first_index = self.index_staging.len() as u32;
             self.vertex_staging.extend_from_slice(&mesh.vertices);
             self.index_staging.extend_from_slice(&mesh.indices);
-            draws.push((
-                [x0, y0, x1 - x0, y1 - y0],
-                mesh.texture,
-                first_index..first_index + mesh.indices.len() as u32,
+            draws.push(UiDraw {
+                scissor: [x0, y0, x1 - x0, y1 - y0],
+                texture: mesh.texture,
+                indices: first_index..first_index + mesh.indices.len() as u32,
                 base_vertex,
-            ));
+            });
         }
         if draws.is_empty() {
-            return;
+            return None;
         }
 
         rhi.write_buffer(
@@ -459,21 +458,23 @@ impl UiRenderer {
             BufferUsage::INDEX,
             bytemuck::cast_slice(&self.index_staging),
         );
-        let (Some(vb), Some(ib)) = (&self.vertex_buffer, &self.index_buffer) else {
+        Some(UiDraws(draws))
+    }
+
+    /// Draws what [`UiRenderer::prepare`] uploaded, over whatever the target already holds.
+    pub(crate) fn record(&self, pass: &mut RenderPass<'_>, draws: &UiDraws) {
+        let (Some(pipeline), Some(vb), Some(ib)) =
+            (&self.pipeline, &self.vertex_buffer, &self.index_buffer)
+        else {
             return;
         };
-
-        let mut pass = frame.render_pass(&RenderPassDesc {
-            label: "Ui",
-            color: Some(LoadOp::Load),
-            depth: None,
-        });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &self.screen_group, &[]);
         pass.set_vertex_buffer(0, vb);
         pass.set_index_buffer(ib);
-        for ([x, y, w, h], texture, indices, base_vertex) in draws {
-            let group = match texture {
+        for draw in &draws.0 {
+            let [x, y, w, h] = draw.scissor;
+            let group = match draw.texture {
                 Some(id) => match self.textures.get(&id) {
                     Some(t) => &t.group,
                     None => continue,
@@ -482,10 +483,22 @@ impl UiRenderer {
             };
             pass.set_scissor_rect(x, y, w, h);
             pass.set_bind_group(1, group, &[]);
-            pass.draw_indexed(indices, base_vertex, 0..1);
+            pass.draw_indexed(draw.indices.clone(), draw.base_vertex, 0..1);
         }
     }
 }
+
+#[derive(Debug)]
+struct UiDraw {
+    scissor: [u32; 4],
+    texture: Option<UiTextureId>,
+    indices: std::ops::Range<u32>,
+    base_vertex: i32,
+}
+
+/// One frame's uploaded UI draws.
+#[derive(Debug)]
+pub(crate) struct UiDraws(Vec<UiDraw>);
 
 #[cfg(test)]
 mod tests {

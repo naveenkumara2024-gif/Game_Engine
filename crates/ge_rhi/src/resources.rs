@@ -147,7 +147,7 @@ impl BitOr for BufferUsage {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TextureUsage(wgpu::TextureUsages);
 
 impl TextureUsage {

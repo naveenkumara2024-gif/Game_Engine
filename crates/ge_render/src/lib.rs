@@ -2,10 +2,10 @@
 //! passes. Everything GPU-facing goes through `ge_rhi`; this crate never names a graphics API
 //! type (law 12).
 //!
-//! Scope so far: one forward pass with reversed-Z depth, lighting v0 (punctual lights, no
-//! shadows), Blender-style color management, a grid overlay and a UI pass, plus a
-//! single-threaded extract into [`RenderSnapshot`]. The render graph and the render thread
-//! arrive in M5; shadows, IBL and clustering in M4.
+//! Scope so far: clustered forward+ PBR with CSM + atlas shadows, IBL, HDR bloom and
+//! tonemapping (M4), recorded through a per-frame [`graph::RenderGraph`] (M5, plan 0008), plus
+//! an extract into [`RenderSnapshot`]. The render world and the render thread are the rest of
+//! M5.
 
 #![forbid(unsafe_code)]
 
@@ -14,6 +14,7 @@ mod camera;
 mod components;
 pub mod demo;
 mod frame;
+pub mod graph;
 mod ibl;
 pub mod lighting;
 mod mesh;

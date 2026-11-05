@@ -5,12 +5,13 @@
 use bytemuck::{Pod, Zeroable};
 use ge_rhi::{
     BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,
-    Buffer, BufferDesc, BufferUsage, ComputePipeline, ComputePipelineDesc, Frame, Rhi, SampleKind,
+    Buffer, BufferDesc, BufferUsage, ComputePipeline, ComputePipelineDesc, Rhi, SampleKind,
     Sampler, ShaderStages, Texture, TextureDim,
 };
 use ge_shader::ShaderLibrary;
 use tracing::error;
 
+use crate::graph::{GraphBuffer, RenderGraph};
 use crate::lighting::{LightUniform, MAX_LIGHTS};
 
 /// Cluster grid (plan 0006, decision 2): 16 × 9 screen tiles × 24 exponential depth slices.
@@ -324,13 +325,17 @@ impl FrameResources {
         );
     }
 
-    /// Light culling: one invocation per cluster.
-    pub(crate) fn cull(&self, frame: &mut Frame) {
+    /// Light culling, one invocation per cluster: rewrites the cluster light lists (tracked
+    /// as `clusters`). Not added when the culling shader failed to build.
+    pub(crate) fn add_cull<'a>(&'a self, g: &mut RenderGraph<'a>, clusters: GraphBuffer) {
         let Some(pipeline) = &self.cull else { return };
-        let mut pass = frame.compute_pass("LightCulling");
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &self.cull_group, &[]);
-        pass.dispatch(CLUSTER_COUNT.div_ceil(64), 1, 1);
+        g.compute_pass("LightCulling")
+            .write(clusters)
+            .run(move |pass, _| {
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &self.cull_group, &[]);
+                pass.dispatch(CLUSTER_COUNT.div_ceil(64), 1, 1);
+            });
     }
 }
 

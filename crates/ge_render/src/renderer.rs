@@ -10,18 +10,20 @@
 //! Ui
 //! ```
 //!
-//! It talks to the GPU only through `ge_rhi` (law 12). The pass order is fixed for now; the
-//! render graph (M5) will own it, with transient aliasing and pass culling.
+//! It talks to the GPU only through `ge_rhi` (law 12). Each frame declares these passes in a
+//! [`RenderGraph`] (plan 0008), which culls unused ones (bloom at intensity 0, shadows nobody
+//! samples), allocates SceneColor/SceneDepth/bloom as pooled transients, and records the rest.
 
 use std::collections::HashMap;
+use std::slice;
 
 use bytemuck::{Pod, Zeroable};
 use ge_asset::{AssetId, MaterialAsset, Mesh as AssetMesh};
 use ge_rhi::{
     BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,
-    BlendMode, Buffer, BufferDesc, BufferUsage, ClearColor, ColorTarget, CompareFunction, CullMode,
-    DepthBias, DepthState, DepthTarget, Frame, LoadOp, RenderPass, RenderPipeline,
-    RenderPipelineDesc, Rhi, RhiError, ShaderModule, ShaderStages, TargetPassDesc, TextureFormat,
+    BlendMode, Buffer, BufferDesc, BufferUsage, ClearColor, CompareFunction, CullMode, DepthBias,
+    DepthState, Frame, LoadOp, RenderPass, RenderPipeline, RenderPipelineDesc, Rhi, RhiError,
+    ShaderModule, ShaderStages, Texture, TextureFormat,
 };
 use ge_shader::{ShaderError, ShaderLibrary};
 use glam::{Mat4, Vec3, Vec4};
@@ -32,6 +34,9 @@ use crate::assets::{AssetUpload, GpuAssets};
 use crate::camera::aspect_ratio;
 use crate::frame::{
     CLUSTERS, FrameResources, GroupInputs, R_CLUSTERS_FAR, ViewUniform, slice_params,
+};
+use crate::graph::{
+    GraphBuffer, GraphReport, GraphTexture, RenderGraph, TransientDesc, TransientPool,
 };
 use crate::ibl::{EnvKey, Environment};
 use crate::lighting::{
@@ -48,6 +53,26 @@ ge_core::declare_cvar!(pub static R_DEBUG_NORMALS: bool = (
     false,
     "Shade meshes with their world-space normals (switches the mesh shader permutation)"
 ));
+
+ge_core::declare_cvar!(pub static R_GRAPH_STATS: bool = (
+    "r.Graph.Stats",
+    false,
+    "Log the render graph every 120 frames: passes run and culled, transient textures vs the \
+     physical textures backing them, memory saved by aliasing"
+));
+
+/// What the scene passes need besides `&Renderer`.
+struct ScenePassInputs<'a> {
+    items: &'a [DrawItem],
+    camera_position: Vec3,
+    clear_color: [f32; 3],
+    grid: bool,
+    /// `(cascades, atlas)` when this frame renders shadows.
+    shadows: Option<(GraphTexture, GraphTexture)>,
+    clusters: GraphBuffer,
+    depth: GraphTexture,
+    color: GraphTexture,
+}
 
 /// Objects per frame. The GPU scene (M5/M12) removes this cap.
 pub const MAX_OBJECTS: usize = 1024;
@@ -281,6 +306,9 @@ pub struct Renderer {
     group_dirty: bool,
     frame_index: u64,
     warned_overflow: bool,
+    graph_pool: TransientPool<Texture>,
+    last_graph: GraphReport,
+    warned_graph: bool,
 }
 
 impl Renderer {
@@ -364,6 +392,9 @@ impl Renderer {
             group_dirty: true,
             frame_index: 0,
             warned_overflow: false,
+            graph_pool: TransientPool::default(),
+            last_graph: GraphReport::default(),
+            warned_graph: false,
         };
         renderer.rebuild_pipelines(rhi);
         renderer
@@ -658,7 +689,9 @@ impl Renderer {
         self.render_frame(rhi, frame, FrameInputs::basic(view, items));
     }
 
-    /// Records one frame (see the module docs for the pass order).
+    /// Records one frame (see the module docs for the pass order). The per-frame uploads
+    /// happen first, then every pass is declared in a [`RenderGraph`], which culls,
+    /// allocates and records them.
     pub fn render_frame(&mut self, rhi: &Rhi, frame: &mut Frame, inputs: FrameInputs<'_>) {
         let _span = info_span!("Render::Scene", items = inputs.items.len()).entered();
         self.frame_index += 1;
@@ -669,7 +702,6 @@ impl Renderer {
         if size.0 == 0 || size.1 == 0 {
             return;
         }
-        self.post.ensure_targets(rhi, size, &self.frame.view_buffer);
 
         let view = inputs.view;
         let camera = &view.camera;
@@ -703,13 +735,15 @@ impl Renderer {
                 ..Default::default()
             }
         };
+        let shadows_on = shadows_on && !plan.views.is_empty();
         let light_uniforms: Vec<LightUniform> = lights
             .iter()
             .zip(&plan.slots)
             .map(|(l, slot)| LightUniform::pack(l, *slot))
             .collect();
 
-        // Environment (rebuilt only when the world changes).
+        // Environment (rebuilt only when the world changes). A persistent bake, so it runs
+        // before the graph rather than as a per-frame pass.
         let ibl_on = rendered && inputs.world.is_some() && self.env.has_pipelines();
         if let (true, Some(world)) = (ibl_on, inputs.world) {
             let sun = lights
@@ -785,7 +819,7 @@ impl Renderer {
                 lights.len().min(crate::lighting::MAX_LIGHTS) as u32,
                 self.env.mip_count,
                 u32::from(ibl_on && self.env.ready),
-                u32::from(shadows_on && !plan.views.is_empty())
+                u32::from(shadows_on)
                     | (u32::from(crate::frame::R_CLUSTERS_BRUTE_FORCE.get()) << 1),
             ],
             params: [
@@ -813,31 +847,117 @@ impl Renderer {
         };
         self.upload_objects(rhi, items);
         self.prepare_primitives(rhi, items);
-
-        if let Some(p) = &self.pipelines
-            && shadows_on
-            && !plan.views.is_empty()
-        {
-            self.shadow_passes(rhi, frame, p, &plan, items);
-        }
-
-        let Some(targets) = &self.post.targets else {
-            return;
+        let shadow_offsets = if shadows_on {
+            self.shadows.upload(rhi, &plan)
+        } else {
+            Vec::new()
         };
-        // Depth prepass: opaque + masked.
-        {
-            let mut pass = frame.pass_to(&TargetPassDesc {
-                label: "DepthPrepass",
-                color: &[],
-                depth: Some(DepthTarget {
-                    view: &targets.depth_view,
-                    load: LoadOp::Clear(DEPTH_CLEAR),
-                    store: true,
-                }),
-            });
-            if let (Some(p), Some(group)) = (&self.pipelines, &self.frame.group) {
+        let ui_draws = inputs.ui.and_then(|ui| self.ui.prepare(rhi, size, ui));
+
+        // Everything below only reads `self`; the pool is the one mutable piece.
+        let mut pool = std::mem::take(&mut self.graph_pool);
+        let result = {
+            let this = &*self;
+            let mut g = RenderGraph::new();
+            let backbuffer = g.import_backbuffer(frame.backbuffer());
+            let depth = g.create_texture("SceneDepth", TransientDesc::target(size, DEPTH_FORMAT));
+            let color = g.create_texture(
+                "SceneColor",
+                TransientDesc::target(size, SCENE_COLOR_FORMAT),
+            );
+            let clusters = g.import_buffer("ClusterLights");
+            let cascades = g.import_texture("ShadowCascades", &this.shadows.csm_layers);
+            let atlas = g.import_texture("ShadowAtlas", slice::from_ref(&this.shadows.atlas_view));
+
+            if shadows_on {
+                this.add_shadow_passes(&mut g, &plan, &shadow_offsets, items, cascades, atlas);
+            }
+            this.add_scene_passes(
+                &mut g,
+                ScenePassInputs {
+                    items,
+                    camera_position: camera.position,
+                    clear_color: view.clear_color,
+                    grid: inputs.overlays.grid,
+                    shadows: shadows_on.then_some((cascades, atlas)),
+                    clusters,
+                    depth,
+                    color,
+                },
+            );
+            let bloom = this.post.add_bloom(&mut g, rhi, color, size, inputs.bloom);
+            let bloom = bloom.filter(|_| inputs.bloom.intensity > 0.0);
+            this.post.add_tonemap(
+                &mut g,
+                rhi,
+                &this.frame.view_buffer,
+                color,
+                bloom,
+                backbuffer,
+            );
+            if let Some(draws) = ui_draws {
+                g.raster_pass("Ui")
+                    .color(backbuffer, LoadOp::Load)
+                    .run(move |pass, _| this.ui.record(pass, &draws));
+            }
+            g.execute(rhi, frame, &mut pool)
+        };
+        self.graph_pool = pool;
+        match result {
+            Ok(report) => {
+                if R_GRAPH_STATS.get() && self.frame_index.is_multiple_of(120) {
+                    info!(
+                        executed = report.executed.len(),
+                        culled = ?report.culled,
+                        virtual_textures = report.virtual_textures,
+                        physical_textures = report.physical_textures,
+                        saved_mb = (report.virtual_bytes - report.physical_bytes) as f64 / 1048576.0,
+                        pooled = self.graph_pool.len(),
+                        "render graph"
+                    );
+                }
+                self.last_graph = report;
+            }
+            Err(e) => {
+                if !self.warned_graph {
+                    error!(error = %e, "render graph rejected; frame not drawn");
+                    self.warned_graph = true;
+                }
+            }
+        }
+    }
+
+    /// What the last frame's graph executed, culled and allocated.
+    pub fn last_graph_report(&self) -> &GraphReport {
+        &self.last_graph
+    }
+
+    /// Physical transient textures held across frames (for tests and stats).
+    pub fn transient_pool_len(&self) -> usize {
+        self.graph_pool.len()
+    }
+
+    /// DepthPrepass, LightCulling and the Opaque pass (opaque, sky, sorted transparents,
+    /// grid).
+    fn add_scene_passes<'a>(&'a self, g: &mut RenderGraph<'a>, s: ScenePassInputs<'a>) {
+        let ScenePassInputs {
+            items,
+            camera_position,
+            clear_color: [r, gr, b],
+            grid,
+            shadows,
+            clusters,
+            depth,
+            color,
+        } = s;
+        g.raster_pass("DepthPrepass")
+            .depth(depth, LoadOp::Clear(DEPTH_CLEAR), true)
+            .run(move |pass, _| {
+                let (Some(p), Some(group)) = (&self.pipelines, &self.frame.group) else {
+                    return;
+                };
                 pass.set_bind_group(0, group, &[]);
-                self.draw_items(&mut pass, items, |item| {
+                self.draw_items(pass, items, |item| {
                     (!item.is_blended()).then(|| {
                         let masked = matches!(item.alpha, DrawAlpha::Mask(_));
                         let set = if masked {
@@ -848,29 +968,22 @@ impl Renderer {
                         &set[usize::from(item.double_sided)]
                     })
                 });
-            }
-        }
-
-        self.frame.cull(frame);
-
-        // Main pass: opaque, sky, transparent (back to front), grid.
-        {
-            let [r, g, b] = view.clear_color;
-            let mut pass = frame.pass_to(&TargetPassDesc {
-                label: "Opaque",
-                color: &[ColorTarget {
-                    view: &targets.color_view,
-                    load: LoadOp::Clear(ClearColor([r, g, b, 1.0])),
-                }],
-                depth: Some(DepthTarget {
-                    view: &targets.depth_view,
-                    load: LoadOp::Load,
-                    store: true,
-                }),
             });
+
+        self.frame.add_cull(g, clusters);
+
+        let mut opaque = g
+            .raster_pass("Opaque")
+            .color(color, LoadOp::Clear(ClearColor([r, gr, b, 1.0])))
+            .depth(depth, LoadOp::Load, true)
+            .read(clusters);
+        if let Some((cascades, atlas)) = shadows {
+            opaque = opaque.read(cascades).read(atlas);
+        }
+        opaque.run(move |pass, _| {
             if let (Some(p), Some(group)) = (&self.pipelines, &self.frame.group) {
                 pass.set_bind_group(0, group, &[]);
-                self.draw_items(&mut pass, items, |item| {
+                self.draw_items(pass, items, |item| {
                     (!item.is_blended()).then(|| &p.opaque[usize::from(item.double_sided)])
                 });
                 pass.set_pipeline(&p.sky);
@@ -882,52 +995,40 @@ impl Renderer {
                     .enumerate()
                     .filter(|(_, i)| i.is_blended())
                     .map(|(n, i)| {
-                        (
-                            n,
-                            i.world_from_local
-                                .w_axis
-                                .truncate()
-                                .distance_squared(camera.position),
-                        )
+                        let at = i.world_from_local.w_axis.truncate();
+                        (n, at.distance_squared(camera_position))
                     })
                     .collect();
                 if !blended.is_empty() {
                     blended.sort_by(|a, b| b.1.total_cmp(&a.1));
                     pass.set_bind_group(0, group, &[]);
                     let order: Vec<usize> = blended.into_iter().map(|(n, _)| n).collect();
-                    self.draw_indexed_subset(&mut pass, items, &order, |item| {
+                    self.draw_indexed_subset(pass, items, &order, |item| {
                         Some(&p.transparent[usize::from(item.double_sided)])
                     });
                 }
             }
-            if inputs.overlays.grid
-                && let (Some(grid), Some(group)) = (&self.grid, &self.frame.group)
-            {
+            if grid && let (Some(grid), Some(group)) = (&self.grid, &self.frame.group) {
                 pass.set_pipeline(grid);
                 pass.set_bind_group(0, group, &[]);
                 pass.draw(0..3, 0..1);
             }
-        }
-
-        self.post.bloom(rhi, frame, inputs.bloom);
-        let backbuffer = frame.backbuffer();
-        self.post.tonemap(frame, &backbuffer);
-
-        if let Some(ui) = inputs.ui {
-            self.ui.render(rhi, frame, ui);
-        }
+        });
     }
 
-    fn shadow_passes(
-        &self,
-        rhi: &Rhi,
-        frame: &mut Frame,
-        p: &ScenePipelines,
+    /// One pass per sun cascade (each writes its layer of `cascades`) and one for the atlas
+    /// (spot/point/area tiles, one viewport each).
+    fn add_shadow_passes<'a>(
+        &'a self,
+        g: &mut RenderGraph<'a>,
         plan: &ShadowPlan,
-        items: &[DrawItem],
+        offsets: &[u32],
+        items: &'a [DrawItem],
+        cascades: GraphTexture,
+        atlas: GraphTexture,
     ) {
-        let offsets = self.shadows.upload(rhi, plan);
-        let pick = |item: &DrawItem| -> Option<&RenderPipeline> {
+        let Some(p) = &self.pipelines else { return };
+        let pick = move |item: &DrawItem| -> Option<&'a RenderPipeline> {
             if !item.cast_shadow || (item.is_blended() && !item.transparent_shadows) {
                 return None;
             }
@@ -935,44 +1036,38 @@ impl Renderer {
             let set = if masked { &p.shadow_masked } else { &p.shadow };
             Some(&set[usize::from(item.double_sided || item.shadow_double_sided)])
         };
-        for (view, &offset) in plan.views.iter().zip(&offsets) {
+        for (view, &offset) in plan.views.iter().zip(offsets) {
             if let Some(layer) = view.cascade {
-                let mut pass = frame.pass_to(&TargetPassDesc {
-                    label: "Shadows.Cascade",
-                    color: &[],
-                    depth: Some(DepthTarget {
-                        view: &self.shadows.csm_layers[layer],
-                        load: LoadOp::Clear(DEPTH_CLEAR),
-                        store: true,
-                    }),
-                });
-                pass.set_bind_group(0, &self.shadows.view_group, &[offset]);
-                self.draw_items(&mut pass, items, pick);
+                g.raster_pass("Shadows.Cascade")
+                    .depth(
+                        cascades.subview(layer as u32),
+                        LoadOp::Clear(DEPTH_CLEAR),
+                        true,
+                    )
+                    .run(move |pass, _| {
+                        pass.set_bind_group(0, &self.shadows.view_group, &[offset]);
+                        self.draw_items(pass, items, pick);
+                    });
             }
         }
-        let locals: Vec<_> = plan
+        let tiles: Vec<([u32; 3], u32)> = plan
             .views
             .iter()
-            .zip(&offsets)
+            .zip(offsets)
             .filter(|(v, _)| v.cascade.is_none())
+            .map(|(v, &o)| (v.tile, o))
             .collect();
-        if !locals.is_empty() {
-            let mut pass = frame.pass_to(&TargetPassDesc {
-                label: "Shadows.Atlas",
-                color: &[],
-                depth: Some(DepthTarget {
-                    view: &self.shadows.atlas_view,
-                    load: LoadOp::Clear(DEPTH_CLEAR),
-                    store: true,
-                }),
-            });
-            for (view, &offset) in locals {
-                let [x, y, s] = view.tile;
-                pass.set_viewport(x as f32, y as f32, s as f32, s as f32);
-                pass.set_scissor_rect(x, y, s, s);
-                pass.set_bind_group(0, &self.shadows.view_group, &[offset]);
-                self.draw_items(&mut pass, items, pick);
-            }
+        if !tiles.is_empty() {
+            g.raster_pass("Shadows.Atlas")
+                .depth(atlas, LoadOp::Clear(DEPTH_CLEAR), true)
+                .run(move |pass, _| {
+                    for ([x, y, s], offset) in tiles {
+                        pass.set_viewport(x as f32, y as f32, s as f32, s as f32);
+                        pass.set_scissor_rect(x, y, s, s);
+                        pass.set_bind_group(0, &self.shadows.view_group, &[offset]);
+                        self.draw_items(pass, items, pick);
+                    }
+                });
         }
     }
 

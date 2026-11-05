@@ -1,17 +1,19 @@
 //! HDR targets and post-processing (plan 0006, decisions 1 and 5): the scene renders into
 //! `SceneColor` (Rgba16Float) + `SceneDepth`; bloom (dual filter) reads it; tonemap writes the
-//! display target. The transient textures are owned here until the render graph (M5).
+//! display target. All three are render-graph transients (plan 0008). The graph culls bloom's
+//! passes when the tonemap doesn't read their result.
 
 use bytemuck::{Pod, Zeroable};
 use ge_rhi::{
     AddressMode, BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
-    BindingType, BlendMode, Buffer, BufferDesc, BufferUsage, ClearColor, ColorTarget, CullMode,
-    FilterMode, Frame, LoadOp, RenderPipeline, RenderPipelineDesc, Rhi, Sampler, SamplerDesc,
-    ShaderStages, TargetPassDesc, Texture, TextureDesc, TextureDescEx, TextureDim, TextureFormat,
-    TextureUsage, TextureView, ViewRange,
+    BindingType, BlendMode, Buffer, BufferDesc, BufferUsage, ClearColor, CullMode, FilterMode,
+    LoadOp, RenderPipeline, RenderPipelineDesc, Rhi, Sampler, SamplerDesc, ShaderStages, Texture,
+    TextureDesc, TextureDim, TextureFormat, TextureUsage, TextureView,
 };
 use ge_shader::ShaderLibrary;
 use tracing::error;
+
+use crate::graph::{GraphTexture, RenderGraph, TransientDesc};
 
 ge_core::declare_cvar!(pub static R_BLOOM_INTENSITY: f32 = (
     "r.Bloom.Intensity",
@@ -83,21 +85,6 @@ struct BloomParams {
     _pad: [f32; 2],
 }
 
-pub(crate) struct Targets {
-    pub size: (u32, u32),
-    // The textures are kept alive here; passes use the views.
-    #[allow(dead_code)]
-    pub color: Texture,
-    pub color_view: TextureView,
-    #[allow(dead_code)]
-    pub depth: Texture,
-    pub depth_view: TextureView,
-    #[allow(dead_code)]
-    bloom: Texture,
-    bloom_views: Vec<TextureView>,
-    bloom_mips: u32,
-}
-
 pub(crate) struct Post {
     sampler: Sampler,
     tonemap_layout: BindGroupLayout,
@@ -108,15 +95,16 @@ pub(crate) struct Post {
     params: Buffer,
     params_stride: u64,
     output_format: TextureFormat,
-    pub targets: Option<Targets>,
-    tonemap_group: Option<BindGroup>,
-    bloom_groups: Vec<BindGroup>,
+    /// Bound in place of the bloom texture when bloom is culled (intensity 0).
+    #[allow(dead_code)]
+    black: Texture,
+    black_view: TextureView,
 }
 
 impl std::fmt::Debug for Post {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Post")
-            .field("size", &self.targets.as_ref().map(|t| t.size))
+            .field("pipelines", &self.has_pipelines())
             .finish_non_exhaustive()
     }
 }
@@ -182,6 +170,13 @@ impl Post {
             anisotropy: 1,
             compare: None,
         });
+        // wgpu zero-initializes textures, so this samples as black.
+        let black = rhi.create_texture(&TextureDesc {
+            label: "BloomOff",
+            size: (1, 1),
+            format: SCENE_COLOR_FORMAT,
+            usage: TextureUsage::TEXTURE_BINDING,
+        });
         Self {
             sampler,
             tonemap_layout,
@@ -192,9 +187,8 @@ impl Post {
             params,
             params_stride,
             output_format,
-            targets: None,
-            tonemap_group: None,
-            bloom_groups: Vec::new(),
+            black_view: black.full_view(),
+            black,
         }
     }
 
@@ -274,131 +268,60 @@ impl Post {
         self.tonemap.is_some() && self.bloom_down.is_some() && self.bloom_up.is_some()
     }
 
-    /// (Re)creates the HDR targets for `size`. Returns true when they were replaced.
-    pub(crate) fn ensure_targets(
-        &mut self,
-        rhi: &Rhi,
-        size: (u32, u32),
-        view_buffer: &Buffer,
-    ) -> bool {
-        if self.targets.as_ref().is_some_and(|t| t.size == size) && self.tonemap_group.is_some() {
-            return false;
-        }
-        let color = rhi.create_texture(&TextureDesc {
-            label: "SceneColor",
-            size,
-            format: SCENE_COLOR_FORMAT,
-            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
-        });
-        let depth = rhi.create_texture(&TextureDesc {
-            label: "SceneDepth",
-            size,
-            format: DEPTH_FORMAT,
-            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
-        });
+    /// Bloom chain sizes for a `size` frame: half resolution, then halving per level.
+    pub(crate) fn bloom_sizes(size: (u32, u32)) -> Vec<(u32, u32)> {
         let half = ((size.0 / 2).max(1), (size.1 / 2).max(1));
-        let bloom_mips = BLOOM_MIPS.min(half.0.min(half.1).max(1).ilog2() + 1);
-        let bloom = rhi.create_texture_ex(&TextureDescEx {
-            label: "Bloom",
-            size: half,
-            format: SCENE_COLOR_FORMAT,
-            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
-            mip_levels: bloom_mips,
-            layers: 1,
-            dim: TextureDim::D2,
-        });
-        let bloom_views: Vec<TextureView> = (0..bloom_mips)
-            .map(|m| bloom.view(ViewRange::level(m, 0)))
-            .collect();
+        let levels = BLOOM_MIPS.min(half.0.min(half.1).max(1).ilog2() + 1);
+        (0..levels)
+            .map(|m| ((half.0 >> m).max(1), (half.1 >> m).max(1)))
+            .collect()
+    }
 
-        let color_view = color.full_view();
-        self.tonemap_group = Some(rhi.create_bind_group(
-            "Tonemap",
-            &self.tonemap_layout,
+    fn bloom_group(&self, rhi: &Rhi, src: &TextureView) -> BindGroup {
+        rhi.create_bind_group(
+            "Bloom",
+            &self.bloom_layout,
             &[
                 BindGroupEntry {
                     binding: 0,
                     resource: BindingResource::Buffer {
-                        buffer: view_buffer,
+                        buffer: &self.params,
                         offset: 0,
-                        size: None,
+                        size: Some(size_of::<BloomParams>() as u64),
                     },
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: BindingResource::View(&color_view),
+                    resource: BindingResource::View(src),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: BindingResource::View(&bloom_views[0]),
-                },
-                BindGroupEntry {
-                    binding: 3,
                     resource: BindingResource::Sampler(&self.sampler),
                 },
             ],
-        ));
-        // Bloom groups: [down sources: scene, mip0..mip(n-2)] then [up sources: mip(n-1)..mip1].
-        let params_binding = BindGroupEntry {
-            binding: 0,
-            resource: BindingResource::Buffer {
-                buffer: &self.params,
-                offset: 0,
-                size: Some(size_of::<BloomParams>() as u64),
-            },
-        };
-        let group = |src: &TextureView| {
-            rhi.create_bind_group(
-                "Bloom",
-                &self.bloom_layout,
-                &[
-                    params_binding,
-                    BindGroupEntry {
-                        binding: 1,
-                        resource: BindingResource::View(src),
-                    },
-                    BindGroupEntry {
-                        binding: 2,
-                        resource: BindingResource::Sampler(&self.sampler),
-                    },
-                ],
-            )
-        };
-        let mut groups = vec![group(&color_view)];
-        for m in 0..bloom_mips.saturating_sub(1) {
-            groups.push(group(&bloom_views[m as usize]));
-        }
-        for m in (1..bloom_mips).rev() {
-            groups.push(group(&bloom_views[m as usize]));
-        }
-        self.bloom_groups = groups;
-        self.targets = Some(Targets {
-            size,
-            depth_view: depth.full_view(),
-            color_view,
-            color,
-            depth,
-            bloom,
-            bloom_views,
-            bloom_mips,
-        });
-        true
+        )
     }
 
-    /// Bloom chain into the bloom texture's mip 0 (skipped when `settings.intensity` is 0).
-    pub(crate) fn bloom(&self, rhi: &Rhi, frame: &mut Frame, settings: BloomSettings) {
-        let (Some(t), Some(down), Some(up)) = (&self.targets, &self.bloom_down, &self.bloom_up)
-        else {
-            return;
+    /// Adds the dual-filter bloom chain reading `scene` and returns its result (level 0).
+    /// The passes are always declared; when the tonemap doesn't read the result (intensity
+    /// 0) the graph culls them. `None` when the bloom shaders failed to build.
+    pub(crate) fn add_bloom<'a>(
+        &'a self,
+        g: &mut RenderGraph<'a>,
+        rhi: &'a Rhi,
+        scene: GraphTexture,
+        size: (u32, u32),
+        settings: BloomSettings,
+    ) -> Option<GraphTexture> {
+        let (Some(down), Some(up)) = (&self.bloom_down, &self.bloom_up) else {
+            return None;
         };
-        if settings.intensity <= 0.0 {
-            return;
-        }
-        let n = t.bloom_mips as usize;
-        // Params: down passes 0..n (source = scene, then mips), up passes.
-        let mut params = Vec::new();
-        let mut src = t.size;
-        for m in 0..n {
+        let sizes = Self::bloom_sizes(size);
+        let n = sizes.len();
+        // Params: down passes 0..n (source = scene, then levels), then up passes.
+        let mut params = Vec::with_capacity(2 * n);
+        let mut src = size;
+        for (m, &level) in sizes.iter().enumerate() {
             params.push(BloomParams {
                 src_texel: [1.0 / src.0 as f32, 1.0 / src.1 as f32],
                 threshold: settings.threshold,
@@ -407,10 +330,9 @@ impl Post {
                 first: if m == 0 { 1.0 } else { 0.0 },
                 _pad: [0.0; 2],
             });
-            src = t.bloom_views[m].size();
+            src = level;
         }
-        for m in (1..n).rev() {
-            let s = t.bloom_views[m].size();
+        for &s in sizes[1..].iter().rev() {
             params.push(BloomParams {
                 src_texel: [1.0 / s.0 as f32, 1.0 / s.1 as f32],
                 radius: settings.radius,
@@ -425,49 +347,112 @@ impl Post {
         }
         rhi.write_buffer(&self.params, 0, &bytes);
 
+        let levels: Vec<GraphTexture> = sizes
+            .iter()
+            .map(|&s| g.create_texture("Bloom", TransientDesc::target(s, SCENE_COLOR_FORMAT)))
+            .collect();
         for m in 0..n {
-            let mut pass = frame.pass_to(&TargetPassDesc {
-                label: "Bloom.Down",
-                color: &[ColorTarget {
-                    view: &t.bloom_views[m],
-                    load: LoadOp::Clear(ClearColor([0.0; 4])),
-                }],
-                depth: None,
-            });
-            pass.set_pipeline(down);
-            pass.set_bind_group(0, &self.bloom_groups[m], &[(m * stride) as u32]);
-            pass.draw(0..3, 0..1);
+            let source = if m == 0 { scene } else { levels[m - 1] };
+            let offset = (m * stride) as u32;
+            g.raster_pass("Bloom.Down")
+                .color(levels[m], LoadOp::Clear(ClearColor([0.0; 4])))
+                .read(source)
+                .run(move |pass, res| {
+                    let group = self.bloom_group(rhi, res.texture(source));
+                    pass.set_pipeline(down);
+                    pass.set_bind_group(0, &group, &[offset]);
+                    pass.draw(0..3, 0..1);
+                });
         }
         for (k, m) in (1..n).rev().enumerate() {
-            let mut pass = frame.pass_to(&TargetPassDesc {
-                label: "Bloom.Up",
-                color: &[ColorTarget {
-                    view: &t.bloom_views[m - 1],
-                    load: LoadOp::Load,
-                }],
-                depth: None,
-            });
-            pass.set_pipeline(up);
-            pass.set_bind_group(0, &self.bloom_groups[n + k], &[((n + k) * stride) as u32]);
-            pass.draw(0..3, 0..1);
+            let (source, target) = (levels[m], levels[m - 1]);
+            let offset = ((n + k) * stride) as u32;
+            g.raster_pass("Bloom.Up")
+                .color(target, LoadOp::Load)
+                .read(source)
+                .run(move |pass, res| {
+                    let group = self.bloom_group(rhi, res.texture(source));
+                    pass.set_pipeline(up);
+                    pass.set_bind_group(0, &group, &[offset]);
+                    pass.draw(0..3, 0..1);
+                });
         }
+        levels.first().copied()
     }
 
-    /// Tonemap the scene (+ bloom) into `output`.
-    pub(crate) fn tonemap(&self, frame: &mut Frame, output: &TextureView) {
-        let (Some(pipeline), Some(group)) = (&self.tonemap, &self.tonemap_group) else {
-            return;
-        };
-        let mut pass = frame.pass_to(&TargetPassDesc {
-            label: "Tonemap",
-            color: &[ColorTarget {
-                view: output,
-                load: LoadOp::Clear(ClearColor([0.0, 0.0, 0.0, 1.0])),
-            }],
-            depth: None,
+    /// Tonemaps `scene` (+ `bloom`, when it's on) into `output`.
+    pub(crate) fn add_tonemap<'a>(
+        &'a self,
+        g: &mut RenderGraph<'a>,
+        rhi: &'a Rhi,
+        view_buffer: &'a Buffer,
+        scene: GraphTexture,
+        bloom: Option<GraphTexture>,
+        output: GraphTexture,
+    ) {
+        let mut pass = g
+            .raster_pass("Tonemap")
+            .color(output, LoadOp::Clear(ClearColor([0.0, 0.0, 0.0, 1.0])))
+            .read(scene);
+        if let Some(bloom) = bloom {
+            pass = pass.read(bloom);
+        }
+        pass.run(move |pass, res| {
+            let Some(pipeline) = &self.tonemap else {
+                return;
+            };
+            let bloom_view = bloom.map_or(&self.black_view, |b| res.texture(b));
+            let group = rhi.create_bind_group(
+                "Tonemap",
+                &self.tonemap_layout,
+                &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: BindingResource::Buffer {
+                            buffer: view_buffer,
+                            offset: 0,
+                            size: None,
+                        },
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: BindingResource::View(res.texture(scene)),
+                    },
+                    BindGroupEntry {
+                        binding: 2,
+                        resource: BindingResource::View(bloom_view),
+                    },
+                    BindGroupEntry {
+                        binding: 3,
+                        resource: BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            );
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.draw(0..3, 0..1);
         });
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, group, &[]);
-        pass.draw(0..3, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bloom_levels_halve_from_half_resolution() {
+        assert_eq!(
+            Post::bloom_sizes((1920, 1080)),
+            [
+                (960, 540),
+                (480, 270),
+                (240, 135),
+                (120, 67),
+                (60, 33),
+                (30, 16)
+            ]
+        );
+        // Tiny frames get fewer levels, never a zero size.
+        assert_eq!(Post::bloom_sizes((4, 2)), [(2, 1)]);
     }
 }
