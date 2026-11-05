@@ -87,7 +87,8 @@ impl<'a> Engine<'a> {
                 };
                 let inputs = FrameInputs {
                     view: &view,
-                    items: &snapshot.items,
+                    items: &[],
+                    scene: Some(&mut snapshot.scene),
                     lights: &snapshot.lights,
                     world: snapshot.world,
                     ambient: Vec3::ZERO,

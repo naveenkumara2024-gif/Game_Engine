@@ -116,8 +116,9 @@ fn children_follow_and_extract_sees_everything() {
     let snap = world.resource::<RenderSnapshot>();
     assert!(snap.camera.is_some(), "camera extracted");
     // floor + 10 pillars + 6 cluster cubes + player + 2 shoulders + antenna, plus Orb Run's
-    // 3 orbs and 2 starting sentinels.
-    assert_eq!(snap.items.len(), 1 + 10 + 6 + 1 + 2 + 1 + 3 + 2);
+    // 3 orbs and 2 starting sentinels. Without a renderer nothing drains the delta, so it
+    // holds one upsert per visible mesh.
+    assert_eq!(snap.scene.upserts().count(), 1 + 10 + 6 + 1 + 2 + 1 + 3 + 2);
 }
 
 #[test]

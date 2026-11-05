@@ -1,6 +1,6 @@
 # 0008 — M5: Render architecture
 
-**Status:** approved 2026-11-05 (as proposed) · in progress: step 1 (render graph) done 2026-11-05; steps 2–3 next · **Milestone:** M5 (CLAUDE.md §9, lore §8)
+**Status:** approved 2026-11-05 (as proposed) · in progress: steps 1 (render graph) and 2 (render world) done 2026-11-05; step 3 next · **Milestone:** M5 (CLAUDE.md §9, lore §8)
 
 ## Progress and deviations
 
@@ -16,6 +16,20 @@ SceneColor, SceneDepth and the bloom levels are pooled transients. The M4 golden
 Deviations:
 - **The real frame has nothing to alias yet.** I claimed in the plan that the bloom chain would alias; that was wrong. The bloom levels all have different sizes and stay live until the upsample chain ends, and SceneColor and SceneDepth overlap. So today `r.Graph.Stats` reports physical = virtual. Aliasing itself is covered by the unit tests. It starts paying off once M12 adds same-size post targets (TAA history, SSAO, half-res chains), and `tests/graph.rs` says so.
 - **The grid stays inside the Opaque pass** rather than becoming its own pass. A separate pass would cost an extra load/store of color and depth at 1080p just to make culling visible. It is still skipped when the overlays are off.
+**Step 2 (render world) is done.**
+- `RenderSnapshot.items` is replaced by `scene: SceneDelta`, a map of entity → upsert or remove, merged until the renderer drains it.
+- The render side keeps a `RenderScene` (`render_scene.rs`):
+  - fixed object-buffer slots, with dirty slots uploaded in contiguous runs;
+  - four cached bins (prepass, opaque, shadow, transparent) of `DrawPacket`s, sorted by pipeline variant, then material;
+  - bins rebuilt only when membership or a bin-relevant field changes.
+- `FrameInputs::items` remains as the immediate path, diffed the same way. The M4 goldens pass unchanged.
+- Arena run with `r.Graph.Stats=1`: 28 proxies, ~15 slots uploaded per frame (3.8 KB; before: all 28, 7.2 KB). The static arena uploads nothing. 6 bin rebuilds in 10 s, all from orb and burst spawns.
+
+Step 2 deviations:
+- **The extract also tracks a `known` entity set.** ECS change ticks can't see despawns, the editor's `Disabled` delete/undo, or removed `Material`/`Visibility` components. So every frame, the extract checks the entities it has sent against the query: one hash lookup per mesh on the main thread, no GPU cost. Tests cover each case.
+- **Packets aren't sorted by mesh.** `MeshKind` holds float primitive parameters and has no order, so we sort by pipeline, then material, the two state changes that cost the most. Instancing by mesh is M12.
+- **The material-asset hot reload is covered by the code path, not a dedicated test.** It re-upserts that material's users, but no test builds an `AssetServer` fixture for it. The M3 hot-reload manual test exercises it.
+
 - **The IBL environment bake runs before the graph.** It is a persistent, change-driven bake that mutates `Environment`, not a per-frame pass. It can move into the graph as a side-effect pass when it gets a GPU timestamp budget of its own.
 
 ## Goal

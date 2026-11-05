@@ -27,7 +27,7 @@ use ge_rhi::{
 };
 use ge_shader::{ShaderError, ShaderLibrary};
 use glam::{Mat4, Vec3, Vec4};
-use tracing::{error, info, info_span, warn};
+use tracing::{error, info, info_span};
 
 use crate::Camera;
 use crate::assets::{AssetUpload, GpuAssets};
@@ -45,6 +45,7 @@ use crate::lighting::{
 use crate::mesh::{GpuMesh, MeshData, Vertex};
 use crate::post::{BloomSettings, DEPTH_FORMAT, Post, SCENE_COLOR_FORMAT};
 use crate::primitives::PrimitiveMesh;
+use crate::render_scene::{DrawPacket, RenderScene, SceneDelta, SceneStats};
 use crate::shadows::{self, ShadowMaps, ShadowPlan};
 use crate::ui::{UiDrawList, UiRenderer};
 
@@ -62,8 +63,7 @@ ge_core::declare_cvar!(pub static R_GRAPH_STATS: bool = (
 ));
 
 /// What the scene passes need besides `&Renderer`.
-struct ScenePassInputs<'a> {
-    items: &'a [DrawItem],
+struct ScenePassInputs {
     camera_position: Vec3,
     clear_color: [f32; 3],
     grid: bool,
@@ -74,7 +74,7 @@ struct ScenePassInputs<'a> {
     color: GraphTexture,
 }
 
-/// Objects per frame. The GPU scene (M5/M12) removes this cap.
+/// Render proxies (object-buffer slots). GPU-driven instancing (M12) removes this cap.
 pub const MAX_OBJECTS: usize = 1024;
 
 /// Generated primitive meshes unused for this many frames are freed (slider scrubbing in the
@@ -132,7 +132,9 @@ pub enum DrawAlpha {
     Blend,
 }
 
-#[derive(Copy, Clone, Debug)]
+/// One render proxy's data (lore §6.7 `PrimitiveProxy`): plain data, so changed proxies can
+/// be compared and copied to the render side.
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct DrawItem {
     pub mesh: MeshKind,
     pub world_from_local: Mat4,
@@ -181,10 +183,6 @@ impl DrawItem {
         }
     }
 
-    fn is_blended(&self) -> bool {
-        self.alpha == DrawAlpha::Blend
-    }
-
     fn cutoff(&self) -> f32 {
         match self.alpha {
             DrawAlpha::Mask(c) => c.clamp(1e-3, 1.0),
@@ -213,7 +211,11 @@ pub struct Overlays {
 #[derive(Debug)]
 pub struct FrameInputs<'a> {
     pub view: &'a RenderView,
+    /// Immediate path (tests, tools): the whole scene as a slice, keyed by index. Ignored
+    /// when `scene` is set.
     pub items: &'a [DrawItem],
+    /// Retained path (the engine): changes since the last rendered frame (drained).
+    pub scene: Option<&'a mut SceneDelta>,
     pub lights: &'a [LightItem],
     /// The world (environment, IBL). `None` = flat `ambient` and `view.clear_color`.
     pub world: Option<RenderWorld>,
@@ -237,6 +239,7 @@ impl<'a> FrameInputs<'a> {
         Self {
             view,
             items,
+            scene: None,
             lights: &[],
             world: None,
             ambient: Vec3::ZERO,
@@ -305,7 +308,7 @@ pub struct Renderer {
     env: Environment,
     group_dirty: bool,
     frame_index: u64,
-    warned_overflow: bool,
+    scene: RenderScene,
     graph_pool: TransientPool<Texture>,
     last_graph: GraphReport,
     warned_graph: bool,
@@ -391,7 +394,7 @@ impl Renderer {
             env,
             group_dirty: true,
             frame_index: 0,
-            warned_overflow: false,
+            scene: RenderScene::default(),
             graph_pool: TransientPool::default(),
             last_graph: GraphReport::default(),
             warned_graph: false,
@@ -693,7 +696,7 @@ impl Renderer {
     /// happen first, then every pass is declared in a [`RenderGraph`], which culls,
     /// allocates and records them.
     pub fn render_frame(&mut self, rhi: &Rhi, frame: &mut Frame, inputs: FrameInputs<'_>) {
-        let _span = info_span!("Render::Scene", items = inputs.items.len()).entered();
+        let _span = info_span!("Render::Scene", proxies = self.scene.len()).entered();
         self.frame_index += 1;
         if let Some(uploads) = inputs.asset_uploads {
             self.assets.apply(rhi, uploads);
@@ -832,21 +835,18 @@ impl Renderer {
         };
         self.frame.upload(rhi, &view_uniform, &light_uniforms);
 
-        let items = if inputs.items.len() > MAX_OBJECTS {
-            if !self.warned_overflow {
-                warn!(
-                    count = inputs.items.len(),
-                    max = MAX_OBJECTS,
-                    "too many draw items; extra skipped"
-                );
-                self.warned_overflow = true;
+        // Render world: apply this frame's changes, upload dirty slots, rebuild bins if needed.
+        match inputs.scene {
+            Some(delta) => {
+                for (key, item) in delta.drain() {
+                    self.scene.apply(key, item);
+                }
             }
-            &inputs.items[..MAX_OBJECTS]
-        } else {
-            inputs.items
-        };
-        self.upload_objects(rhi, items);
-        self.prepare_primitives(rhi, items);
+            None => self.scene.sync_items(inputs.items),
+        }
+        self.upload_objects(rhi);
+        self.scene.update_bins();
+        self.prepare_primitives(rhi);
         let shadow_offsets = if shadows_on {
             self.shadows.upload(rhi, &plan)
         } else {
@@ -870,12 +870,11 @@ impl Renderer {
             let atlas = g.import_texture("ShadowAtlas", slice::from_ref(&this.shadows.atlas_view));
 
             if shadows_on {
-                this.add_shadow_passes(&mut g, &plan, &shadow_offsets, items, cascades, atlas);
+                this.add_shadow_passes(&mut g, &plan, &shadow_offsets, cascades, atlas);
             }
             this.add_scene_passes(
                 &mut g,
                 ScenePassInputs {
-                    items,
                     camera_position: camera.position,
                     clear_color: view.clear_color,
                     grid: inputs.overlays.grid,
@@ -913,6 +912,10 @@ impl Renderer {
                         physical_textures = report.physical_textures,
                         saved_mb = (report.virtual_bytes - report.physical_bytes) as f64 / 1048576.0,
                         pooled = self.graph_pool.len(),
+                        proxies = self.scene.len(),
+                        object_writes = self.scene.stats().object_writes,
+                        object_bytes = self.scene.stats().object_bytes_written,
+                        bin_rebuilds = self.scene.stats().bin_rebuilds,
                         "render graph"
                     );
                 }
@@ -938,10 +941,9 @@ impl Renderer {
     }
 
     /// DepthPrepass, LightCulling and the Opaque pass (opaque, sky, sorted transparents,
-    /// grid).
-    fn add_scene_passes<'a>(&'a self, g: &mut RenderGraph<'a>, s: ScenePassInputs<'a>) {
+    /// grid). Each draws its cached bin.
+    fn add_scene_passes<'a>(&'a self, g: &mut RenderGraph<'a>, s: ScenePassInputs) {
         let ScenePassInputs {
-            items,
             camera_position,
             clear_color: [r, gr, b],
             grid,
@@ -950,6 +952,7 @@ impl Renderer {
             depth,
             color,
         } = s;
+        let bins = &self.scene.bins;
         g.raster_pass("DepthPrepass")
             .depth(depth, LoadOp::Clear(DEPTH_CLEAR), true)
             .run(move |pass, _| {
@@ -957,16 +960,13 @@ impl Renderer {
                     return;
                 };
                 pass.set_bind_group(0, group, &[]);
-                self.draw_items(pass, items, |item| {
-                    (!item.is_blended()).then(|| {
-                        let masked = matches!(item.alpha, DrawAlpha::Mask(_));
-                        let set = if masked {
-                            &p.prepass_masked
-                        } else {
-                            &p.prepass
-                        };
-                        &set[usize::from(item.double_sided)]
-                    })
+                self.draw_packets(pass, &bins.prepass, |v| {
+                    let set = if v >= 2 {
+                        &p.prepass_masked
+                    } else {
+                        &p.prepass
+                    };
+                    &set[usize::from(v & 1)]
                 });
             });
 
@@ -983,29 +983,23 @@ impl Renderer {
         opaque.run(move |pass, _| {
             if let (Some(p), Some(group)) = (&self.pipelines, &self.frame.group) {
                 pass.set_bind_group(0, group, &[]);
-                self.draw_items(pass, items, |item| {
-                    (!item.is_blended()).then(|| &p.opaque[usize::from(item.double_sided)])
-                });
+                self.draw_packets(pass, &bins.opaque, |v| &p.opaque[usize::from(v & 1)]);
                 pass.set_pipeline(&p.sky);
                 pass.set_bind_group(0, group, &[]);
                 pass.draw(0..3, 0..1);
 
-                let mut blended: Vec<(usize, f32)> = items
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, i)| i.is_blended())
-                    .map(|(n, i)| {
-                        let at = i.world_from_local.w_axis.truncate();
-                        (n, at.distance_squared(camera_position))
-                    })
-                    .collect();
-                if !blended.is_empty() {
-                    blended.sort_by(|a, b| b.1.total_cmp(&a.1));
+                if !bins.transparent.is_empty() {
+                    // Back to front from this frame's camera (the bin itself is cached).
+                    let distance = |packet: &DrawPacket| {
+                        self.scene.item(packet.slot).map_or(0.0, |i| {
+                            let at = i.world_from_local.w_axis.truncate();
+                            at.distance_squared(camera_position)
+                        })
+                    };
+                    let mut sorted = bins.transparent.clone();
+                    sorted.sort_by(|a, b| distance(b).total_cmp(&distance(a)));
                     pass.set_bind_group(0, group, &[]);
-                    let order: Vec<usize> = blended.into_iter().map(|(n, _)| n).collect();
-                    self.draw_indexed_subset(pass, items, &order, |item| {
-                        Some(&p.transparent[usize::from(item.double_sided)])
-                    });
+                    self.draw_packets(pass, &sorted, |v| &p.transparent[usize::from(v & 1)]);
                 }
             }
             if grid && let (Some(grid), Some(group)) = (&self.grid, &self.frame.group) {
@@ -1017,24 +1011,20 @@ impl Renderer {
     }
 
     /// One pass per sun cascade (each writes its layer of `cascades`) and one for the atlas
-    /// (spot/point/area tiles, one viewport each).
+    /// (spot/point/area tiles, one viewport each). All draw the shadow bin.
     fn add_shadow_passes<'a>(
         &'a self,
         g: &mut RenderGraph<'a>,
         plan: &ShadowPlan,
         offsets: &[u32],
-        items: &'a [DrawItem],
         cascades: GraphTexture,
         atlas: GraphTexture,
     ) {
         let Some(p) = &self.pipelines else { return };
-        let pick = move |item: &DrawItem| -> Option<&'a RenderPipeline> {
-            if !item.cast_shadow || (item.is_blended() && !item.transparent_shadows) {
-                return None;
-            }
-            let masked = matches!(item.alpha, DrawAlpha::Mask(_)) || item.is_blended();
-            let set = if masked { &p.shadow_masked } else { &p.shadow };
-            Some(&set[usize::from(item.double_sided || item.shadow_double_sided)])
+        let bin = &self.scene.bins.shadow;
+        let pick = move |v: u8| -> &'a RenderPipeline {
+            let set = if v >= 2 { &p.shadow_masked } else { &p.shadow };
+            &set[usize::from(v & 1)]
         };
         for (view, &offset) in plan.views.iter().zip(offsets) {
             if let Some(layer) = view.cascade {
@@ -1046,7 +1036,7 @@ impl Renderer {
                     )
                     .run(move |pass, _| {
                         pass.set_bind_group(0, &self.shadows.view_group, &[offset]);
-                        self.draw_items(pass, items, pick);
+                        self.draw_packets(pass, bin, pick);
                     });
             }
         }
@@ -1065,7 +1055,7 @@ impl Renderer {
                         pass.set_viewport(x as f32, y as f32, s as f32, s as f32);
                         pass.set_scissor_rect(x, y, s, s);
                         pass.set_bind_group(0, &self.shadows.view_group, &[offset]);
-                        self.draw_items(pass, items, pick);
+                        self.draw_packets(pass, bin, pick);
                     }
                 });
         }
@@ -1081,41 +1071,29 @@ impl Renderer {
         }
     }
 
-    /// Draws every item `pick` returns a pipeline for, in list order.
-    fn draw_items<'p>(
+    /// Issues `packets` in order, switching pipeline and material only when they change
+    /// (bins are sorted by both).
+    fn draw_packets<'p>(
         &'p self,
         pass: &mut RenderPass<'_>,
-        items: &[DrawItem],
-        pick: impl Fn(&DrawItem) -> Option<&'p RenderPipeline>,
+        packets: &[DrawPacket],
+        pipeline: impl Fn(u8) -> &'p RenderPipeline,
     ) {
-        let order: Vec<usize> = (0..items.len()).collect();
-        self.draw_indexed_subset(pass, items, &order, pick);
-    }
-
-    fn draw_indexed_subset<'p>(
-        &'p self,
-        pass: &mut RenderPass<'_>,
-        items: &[DrawItem],
-        order: &[usize],
-        pick: impl Fn(&DrawItem) -> Option<&'p RenderPipeline>,
-    ) {
-        let mut current_pipeline: Option<*const RenderPipeline> = None;
+        let mut current_variant = None;
         let mut current_material: Option<Option<AssetId<MaterialAsset>>> = None;
-        for &i in order {
-            let item = &items[i];
-            let Some(pipeline) = pick(item) else { continue };
-            let Some(mesh) = self.mesh_for(&item.mesh) else {
+        for packet in packets {
+            let Some(mesh) = self.mesh_for(&packet.mesh) else {
                 continue;
             };
-            if current_pipeline != Some(pipeline as *const _) {
-                pass.set_pipeline(pipeline);
-                current_pipeline = Some(pipeline as *const _);
+            if current_variant != Some(packet.variant) {
+                pass.set_pipeline(pipeline(packet.variant));
+                current_variant = Some(packet.variant);
             }
-            if current_material != Some(item.material_asset) {
-                pass.set_bind_group(2, self.assets.material_group(item.material_asset), &[]);
-                current_material = Some(item.material_asset);
+            if current_material != Some(packet.material) {
+                pass.set_bind_group(2, self.assets.material_group(packet.material), &[]);
+                current_material = Some(packet.material);
             }
-            let offset = (i as u64 * self.object_stride) as u32;
+            let offset = (u64::from(packet.slot) * self.object_stride) as u32;
             pass.set_bind_group(1, &self.object_group, &[offset]);
             pass.set_vertex_buffer(0, &mesh.vertex_buffer);
             pass.set_index_buffer(&mesh.index_buffer);
@@ -1123,10 +1101,10 @@ impl Renderer {
         }
     }
 
-    /// Generates any primitive meshes this frame needs and frees ones that went unused.
-    fn prepare_primitives(&mut self, rhi: &Rhi, items: &[DrawItem]) {
+    /// Generates any primitive meshes the scene uses and frees ones that went unused.
+    fn prepare_primitives(&mut self, rhi: &Rhi) {
         let frame = self.frame_index;
-        for item in items {
+        for item in self.scene.items() {
             if let MeshKind::Primitive(p) = &item.mesh {
                 self.primitives
                     .entry(*p)
@@ -1144,35 +1122,59 @@ impl Renderer {
             .retain(|_, c| frame - c.last_used <= PRIMITIVE_CACHE_FRAMES);
     }
 
-    /// Packs every object's uniforms at `object_stride` and uploads them in one write.
-    fn upload_objects(&mut self, rhi: &Rhi, items: &[DrawItem]) {
-        if items.is_empty() {
-            return;
-        }
+    /// The GPU scene: uploads only the object slots that changed, one write per contiguous
+    /// run of slots.
+    fn upload_objects(&mut self, rhi: &Rhi) {
+        let _span = info_span!("Render::UploadObjects").entered();
         let stride = self.object_stride as usize;
-        self.object_staging.clear();
-        self.object_staging.resize(stride * items.len(), 0);
-        for (i, item) in items.iter().enumerate() {
-            let uniform = ObjectUniform {
-                world_from_local: item.world_from_local.to_cols_array_2d(),
-                normal_from_local: item
-                    .world_from_local
-                    .inverse()
-                    .transpose()
-                    .to_cols_array_2d(),
-                tint: item.tint.to_array(),
-                material: [
-                    item.metallic,
-                    item.roughness,
-                    item.normal_strength,
-                    item.cutoff(),
-                ],
-                emission: item.emission.extend(item.f0).to_array(),
-            };
-            let bytes = bytemuck::bytes_of(&uniform);
-            self.object_staging[i * stride..i * stride + bytes.len()].copy_from_slice(bytes);
+        let runs = self.scene.take_dirty_runs();
+        let mut bytes_written = 0u64;
+        for &(first, count) in &runs {
+            self.object_staging.clear();
+            self.object_staging.resize(stride * count as usize, 0);
+            for k in 0..count {
+                let Some(item) = self.scene.item(first + k) else {
+                    continue;
+                };
+                let uniform = ObjectUniform::of(item);
+                let bytes = bytemuck::bytes_of(&uniform);
+                let at = k as usize * stride;
+                self.object_staging[at..at + bytes.len()].copy_from_slice(bytes);
+            }
+            rhi.write_buffer(
+                &self.object_buffer,
+                u64::from(first) * self.object_stride,
+                &self.object_staging,
+            );
+            bytes_written += self.object_staging.len() as u64;
         }
-        rhi.write_buffer(&self.object_buffer, 0, &self.object_staging);
+        self.scene.record_upload(runs.len() as u32, bytes_written);
+    }
+
+    /// Render-world counters: proxies, last frame's object uploads, bin rebuilds.
+    pub fn scene_stats(&self) -> SceneStats {
+        self.scene.stats()
+    }
+}
+
+impl ObjectUniform {
+    fn of(item: &DrawItem) -> Self {
+        Self {
+            world_from_local: item.world_from_local.to_cols_array_2d(),
+            normal_from_local: item
+                .world_from_local
+                .inverse()
+                .transpose()
+                .to_cols_array_2d(),
+            tint: item.tint.to_array(),
+            material: [
+                item.metallic,
+                item.roughness,
+                item.normal_strength,
+                item.cutoff(),
+            ],
+            emission: item.emission.extend(item.f0).to_array(),
+        }
     }
 }
 

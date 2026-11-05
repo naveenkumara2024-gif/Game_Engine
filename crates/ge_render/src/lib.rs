@@ -20,6 +20,7 @@ pub mod lighting;
 mod mesh;
 pub mod post;
 pub mod primitives;
+mod render_scene;
 mod renderer;
 pub mod scene;
 pub mod settings;
@@ -37,6 +38,7 @@ pub use lighting::{
 pub use mesh::{GpuMesh, MeshData, Vertex};
 pub use post::BloomSettings;
 pub use primitives::{Primitive, PrimitiveMesh};
+pub use render_scene::{ProxyKey, SceneDelta, SceneStats};
 pub use renderer::{
     DrawAlpha, DrawItem, FrameInputs, MAX_OBJECTS, MeshKind, Overlays, R_DEBUG_NORMALS,
     RenderError, RenderView, Renderer,

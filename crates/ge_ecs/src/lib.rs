@@ -76,7 +76,8 @@ pub mod prelude {
     pub use bevy_ecs::prelude::{
         Added, Bundle, Changed, ChildOf, ChildSpawnerCommands, Children, Commands, Component,
         DetectChanges, DetectChangesMut, Entity, EntityCommands, Has, IntoScheduleConfigs, Local,
-        Mut, Or, Query, Ref, Res, ResMut, Resource, Single, SystemSet, With, Without, World,
+        Mut, Or, Query, Ref, RemovedComponents, Res, ResMut, Resource, Single, SystemSet, With,
+        Without, World,
     };
     pub use bevy_ecs::schedule::ScheduleLabel;
 

@@ -159,3 +159,53 @@ fn steady_state_frames_reuse_the_same_transients() {
     assert_eq!(r.physical_bytes, u64::from(SIZE * SIZE) * (4 + 8));
     assert_eq!(gpu.renderer.transient_pool_len(), 2, "no per-frame growth");
 }
+
+/// Plan 0008 step 2: the render world keeps proxies on the GPU. A static scene uploads no
+/// object data and rebuilds no draw bins; moving one object rewrites one slot.
+#[test]
+fn render_world_uploads_only_changes() {
+    use ge_render::{ProxyKey, SceneDelta};
+    let Some(mut gpu) = gpu() else { return };
+    let view = view();
+    let items = scene();
+    let frame = |gpu: &mut Gpu, delta: &mut SceneDelta| {
+        let mut inputs = FrameInputs::basic(&view, &[]);
+        inputs.scene = Some(delta);
+        draw(gpu, inputs);
+        gpu.renderer.scene_stats()
+    };
+
+    let mut delta = SceneDelta::default();
+    for (i, item) in items.iter().enumerate() {
+        delta.upsert(ProxyKey(i as u64), *item);
+    }
+    let first = frame(&mut gpu, &mut delta);
+    assert!(delta.is_empty(), "the renderer drains the delta");
+    assert_eq!(first.proxies, 2);
+    assert_eq!(first.object_writes, 1, "both new slots in one write");
+    assert_eq!(first.bin_rebuilds, 1);
+
+    let still = frame(&mut gpu, &mut delta);
+    assert_eq!(
+        still.object_bytes_written, 0,
+        "static scene: nothing uploaded"
+    );
+    assert_eq!(still.bin_rebuilds, 1, "static scene: bins reused");
+
+    let mut moved = items[1];
+    moved.world_from_local = Mat4::from_translation(Vec3::new(2.0, 1.0, 0.0));
+    delta.upsert(ProxyKey(1), moved);
+    let after = frame(&mut gpu, &mut delta);
+    assert_eq!(after.object_writes, 1);
+    assert!(after.object_bytes_written > 0 && after.object_bytes_written <= 256);
+    assert_eq!(after.bin_rebuilds, 1, "a move doesn't touch the bins");
+
+    delta.remove(ProxyKey(0));
+    let removed = frame(&mut gpu, &mut delta);
+    assert_eq!((removed.proxies, removed.bin_rebuilds), (1, 2));
+
+    // The immediate path (tests, tools) diffs the slice the same way.
+    draw(&mut gpu, FrameInputs::basic(&view, &items));
+    draw(&mut gpu, FrameInputs::basic(&view, &items));
+    assert_eq!(gpu.renderer.scene_stats().object_bytes_written, 0);
+}
